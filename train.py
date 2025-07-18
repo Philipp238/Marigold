@@ -101,21 +101,25 @@ if "__main__" == __name__:
         "--add_datetime_prefix",
         action="store_true",
         help="Add datetime to the output folder name",
+        default=True
     )
 
     args = parser.parse_args()
     resume_run = args.resume_run
     output_dir = args.output_dir
-    base_data_dir = (
-        args.base_data_dir
-        if args.base_data_dir is not None
-        else os.environ["BASE_DATA_DIR"]
-    )
-    base_ckpt_dir = (
-        args.base_ckpt_dir
-        if args.base_ckpt_dir is not None
-        else os.environ["BASE_CKPT_DIR"]
-    )
+    # base_data_dir = (
+    #     args.base_data_dir
+    #     if args.base_data_dir is not None
+    #     else os.environ["BASE_DATA_DIR"]
+    # )
+    # base_ckpt_dir = (
+    #     args.base_ckpt_dir
+    #     if args.base_ckpt_dir is not None
+    #     else os.environ["BASE_CKPT_DIR"]
+    # )
+
+    base_data_dir = "/home/groups/ai/datasets/diffusion/marigold_data/"
+    base_ckpt_dir = "/home/groups/ai/scholl/diffusion/models/"
 
     # -------------------- Initialization --------------------
     # Resume previous run

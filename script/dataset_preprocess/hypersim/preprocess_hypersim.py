@@ -31,6 +31,10 @@ if "__main__" == __name__:
     dataset_dir = args.dataset_dir
     output_dir = args.output_dir
 
+    split_csv = "~/projects/ml-hypersim/evermotion_dataset/analysis/metadata_images_split_scene_v1.csv"
+    dataset_dir = "/home/groups/ai/datasets/diffusion/marigold_data/hypersim/raw_data"
+    output_dir = "/home/groups/ai/datasets/diffusion/marigold_data/hypersim/processed"
+
     # %%
     raw_meta_df = pd.read_csv(split_csv)
     meta_df = raw_meta_df[raw_meta_df.included_in_public_release].copy()
@@ -38,7 +42,8 @@ if "__main__" == __name__:
     # %%
     for split in ["train", "val", "test"]:
         split_output_dir = os.path.join(output_dir, split)
-        os.makedirs(split_output_dir)
+        if not os.path.exists(split_output_dir):
+            os.makedirs(split_output_dir)
 
         split_meta_df = meta_df[meta_df.split_partition_name == split].copy()
         split_meta_df["rgb_path"] = None
@@ -52,6 +57,12 @@ if "__main__" == __name__:
         split_meta_df["depth_min"] = np.nan
         split_meta_df["depth_max"] = np.nan
         split_meta_df["invalid_ratio"] = np.nan
+        
+        # split_meta_df = split_meta_df.head(100)
+        # Have to download
+        # train:
+        # ai_006_010/images/scene_cam_02_final_hdf5/frame.0053.color.hdf5 
+        # ai_001_001/images/scene_cam_00_final_hdf5/frame.0002.color.hdf5
 
         for i, row in tqdm(split_meta_df.iterrows(), total=len(split_meta_df)):
             # Load data
@@ -76,13 +87,17 @@ if "__main__" == __name__:
             assert os.path.exists(os.path.join(dataset_dir, rgb_path))
             assert os.path.exists(os.path.join(dataset_dir, dist_path))
 
-            with h5py.File(os.path.join(dataset_dir, rgb_path), "r") as f:
-                rgb = np.array(f["dataset"]).astype(float)
-            with h5py.File(os.path.join(dataset_dir, dist_path), "r") as f:
-                dist_from_center = np.array(f["dataset"]).astype(float)
-            with h5py.File(os.path.join(dataset_dir, render_entity_id_path), "r") as f:
-                render_entity_id = np.array(f["dataset"]).astype(int)
-
+            try:
+                with h5py.File(os.path.join(dataset_dir, rgb_path), "r") as f:
+                    rgb = np.array(f["dataset"]).astype(float)
+                with h5py.File(os.path.join(dataset_dir, dist_path), "r") as f:
+                    dist_from_center = np.array(f["dataset"]).astype(float)
+                with h5py.File(os.path.join(dataset_dir, render_entity_id_path), "r") as f:
+                    render_entity_id = np.array(f["dataset"]).astype(int)
+            except:
+                print(f'Path: {rgb_path}')
+                continue
+            
             # Tone map
             rgb_color_tm = tone_map(rgb, render_entity_id)
             rgb_int = (rgb_color_tm * 255).astype(np.uint8)  # [H, W, RGB]
