@@ -1,0 +1,2 @@
+#!/bin/sh
+python script/dataset_preprocess/hypersim/preprocess_hypersim.py --split_csv ~/projects/ml-hypersim/evermotion_dataset/analysis/metadata_images_split_scene_v1.csv --dataset_dir /home/groups/ai/datasets/diffusion/marigold_data/hypersim/raw_data --output_dir /home/groups/ai/datasets/diffusion/marigold_data/hypersim/processed
