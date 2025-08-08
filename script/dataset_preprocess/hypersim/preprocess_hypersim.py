@@ -33,7 +33,7 @@ if "__main__" == __name__:
 
     split_csv = "/home/groups/ai/datasets/diffusion/ml-hypersim/evermotion_dataset/analysis/metadata_images_split_scene_v1.csv"
     dataset_dir = "/home/groups/ai/datasets/diffusion/marigold_data/hypersim/raw_data"
-    output_dir = "/home/groups/ai/datasets/diffusion/marigold_data/hypersim/processed"
+    output_dir = "/scratch/scholl/diffusion/marigold_data/hypersim/processed"
 
     # %%
     raw_meta_df = pd.read_csv(split_csv)
