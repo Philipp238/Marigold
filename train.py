@@ -118,7 +118,7 @@ if "__main__" == __name__:
     #     else os.environ["BASE_CKPT_DIR"]
     # )
 
-    base_data_dir = "/home/groups/ai/datasets/diffusion/marigold_data/"
+    base_data_dir = "/scratch/scholl/diffusion/marigold_data/"
     base_ckpt_dir = "/home/groups/ai/scholl/diffusion/models/"
 
     # -------------------- Initialization --------------------
