@@ -40,6 +40,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from PIL import Image
 
+from marigold.diffusionUQ import losses
 from marigold.marigold_pipeline import MarigoldPipeline, MarigoldDepthOutput
 from src.util import metric
 from src.util.data_loader import skip_first_batches
@@ -51,6 +52,7 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
+from marigold.diffusionUQ.unet import UNet_diffusion_normal
 
 class MarigoldTrainer:
     def __init__(
@@ -85,12 +87,24 @@ class MarigoldTrainer:
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
 
+        # Adapt the last layer of the UNet to fit to the used distributional method
+        distributional_method = self.cfg.loss.kwargs.distributional_method
+        if distributional_method == 'normal':
+            conv_out = self._remove_unet_conv_out()
+            unet_diffusion = UNet_diffusion_normal(
+                backbone=self.model.unet,
+                conv_out=conv_out
+            )
+            self.model.unet = unet_diffusion
+
         # Encode empty text prompt
         self.model.encode_empty_text()
         self.empty_text_embed = self.model.empty_text_embed.detach().clone().to(device)
 
-        self.model.unet.enable_xformers_memory_efficient_attention()
-
+        if distributional_method == 'deterministic':
+            self.model.unet.enable_xformers_memory_efficient_attention()
+        else:
+            self.model.unet.backbone.enable_xformers_memory_efficient_attention()
         # Trainability
         self.model.vae.requires_grad_(False)
         self.model.text_encoder.requires_grad_(False)
@@ -108,7 +122,9 @@ class MarigoldTrainer:
         )
         self.lr_scheduler = LambdaLR(optimizer=self.optimizer, lr_lambda=lr_func)
 
-        # Loss
+        # Loss (TODO)
+        
+        
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
 
         # Training noise scheduler
@@ -126,12 +142,15 @@ class MarigoldTrainer:
         self.scheduler_timesteps = (
             self.training_noise_scheduler.config.num_train_timesteps
         )
-
-        # Eval metrics
+    
+        # Eval metrics (TODO)
         self.metric_funcs = [getattr(metric, _met) for _met in cfg.eval.eval_metrics]
+        self.n_distributional_samples = cfg.eval.n_distributional_samples
+        self.uq_metric_funcs = [getattr(losses, _met) for _met in cfg.eval.uq_eval_metrics]
         self.train_metrics = MetricTracker(*["loss"])
-        self.val_metrics = MetricTracker(*[m.__name__ for m in self.metric_funcs])
+        self.val_metrics = MetricTracker(*[m.__name__ for m in (self.metric_funcs + self.uq_metric_funcs)])
         # main metric for best checkpoint saving
+        #TODO: In future use energy for this??
         self.main_val_metric = cfg.validation.main_val_metric
         self.main_val_metric_goal = cfg.validation.main_val_metric_goal
         assert (
@@ -186,6 +205,16 @@ class MarigoldTrainer:
         self.model.unet.config["in_channels"] = 8
         logging.info("Unet config is updated")
         return
+
+    def _remove_unet_conv_out(self):
+        # Replace the last layer to double output channels
+        old_conv_out = self.model.unet.conv_out
+        
+        self.model.unet.conv_out = torch.nn.Identity()  # Remove the conv_out layer
+        logging.info("Unet conv_out layer is removed")
+
+        return old_conv_out
+    
 
     def train(self, t_end=None):
         logging.info("Start training")
@@ -311,8 +340,8 @@ class MarigoldTrainer:
                 # Masked latent loss
                 if self.gt_mask_type is not None:
                     latent_loss = self.loss(
-                        model_pred[valid_mask_down].float(),
                         target[valid_mask_down].float(),
+                        model_pred[valid_mask_down].float(),
                     )
                 else:
                     latent_loss = self.loss(model_pred.float(), target.float())
@@ -492,8 +521,8 @@ class MarigoldTrainer:
         self,
         data_loader: DataLoader,
         metric_tracker: MetricTracker,
-        save_to_dir: str = None,
-    ):
+        save_to_dir: str = None
+        ):
         self.model.to(self.device)
         metric_tracker.reset()
 
@@ -524,46 +553,64 @@ class MarigoldTrainer:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(seed)
 
-            # Predict depth
-            pipe_out: MarigoldDepthOutput = self.model(
-                rgb_int,
-                denoising_steps=self.cfg.validation.denoising_steps,
-                ensemble_size=self.cfg.validation.ensemble_size,
-                processing_res=self.cfg.validation.processing_res,
-                match_input_res=self.cfg.validation.match_input_res,
-                generator=generator,
-                batch_size=1,  # use batch size 1 to increase reproducibility
-                color_map=None,
-                show_progress_bar=False,
-                resample_method=self.cfg.validation.resample_method,
-            )
-
-            depth_pred: np.ndarray = pipe_out.depth_np
-
-            if "least_square" == self.cfg.eval.alignment:
-                depth_pred, scale, shift = align_depth_least_square(
-                    gt_arr=depth_raw,
-                    pred_arr=depth_pred,
-                    valid_mask_arr=valid_mask,
-                    return_scale_shift=True,
-                    max_resolution=self.cfg.eval.align_max_res,
+            depth_pred_list = []
+            
+            for i in range(self.n_distributional_samples):
+                # Predict depth
+                pipe_out: MarigoldDepthOutput = self.model(
+                    rgb_int,
+                    denoising_steps=self.cfg.validation.denoising_steps,
+                    ensemble_size=self.cfg.validation.ensemble_size,
+                    processing_res=self.cfg.validation.processing_res,
+                    match_input_res=self.cfg.validation.match_input_res,
+                    generator=generator,
+                    batch_size=1,  # use batch size 1 to increase reproducibility
+                    color_map=None,
+                    show_progress_bar=False,
+                    resample_method=self.cfg.validation.resample_method,
                 )
-            else:
-                raise RuntimeError(f"Unknown alignment type: {self.cfg.eval.alignment}")
 
-            # Clip to dataset min max
-            depth_pred = np.clip(
-                depth_pred,
-                a_min=data_loader.dataset.min_depth,
-                a_max=data_loader.dataset.max_depth,
-            )
+                depth_pred: np.ndarray = pipe_out.depth_np
 
-            # clip to d > 0 for evaluation
-            depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+                if "least_square" == self.cfg.eval.alignment:
+                    depth_pred, scale, shift = align_depth_least_square(
+                        gt_arr=depth_raw,
+                        pred_arr=depth_pred,
+                        valid_mask_arr=valid_mask,
+                        return_scale_shift=True,
+                        max_resolution=self.cfg.eval.align_max_res,
+                    )
+                else:
+                    raise RuntimeError(f"Unknown alignment type: {self.cfg.eval.alignment}")
+
+                # Clip to dataset min max
+                depth_pred = np.clip(
+                    depth_pred,
+                    a_min=data_loader.dataset.min_depth,
+                    a_max=data_loader.dataset.max_depth,
+                )
+
+                # clip to d > 0 for evaluation
+                depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+
+
+                depth_pred_list.append(
+                    torch.from_numpy(depth_pred).to(self.device).unsqueeze(0)
+                )
+
+            depth_preds_ts = torch.cat(depth_pred_list, dim=0)
 
             # Evaluate
             sample_metric = []
-            depth_pred_ts = torch.from_numpy(depth_pred).to(self.device)
+            
+            for met_func in self.uq_metric_funcs:
+                _metric_name = met_func.__name__
+                _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
+                sample_metric.append(_metric.__str__())
+                metric_tracker.update(_metric_name, _metric)
+                
+            # Calculate mean
+            depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
 
             for met_func in self.metric_funcs:
                 _metric_name = met_func.__name__

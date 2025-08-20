@@ -59,6 +59,7 @@ class VirtualKITTIDataset(BaseDepthDataset):
         return depth_decoded
 
     def _load_rgb_data(self, rgb_rel_path):
+        print(f'VKitti _load_rgb_data: {rgb_rel_path}')
         rgb_data = super()._load_rgb_data(rgb_rel_path)
         if self.kitti_bm_crop:
             rgb_data = {

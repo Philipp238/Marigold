@@ -114,6 +114,7 @@ class BaseDepthDataset(Dataset):
         return len(self.filenames)
 
     def __getitem__(self, index):
+        print(self)
         rasters, other = self._get_data_item(index)
         if DatasetMode.TRAIN == self.mode:
             rasters = self._training_preprocess(rasters)
@@ -124,7 +125,7 @@ class BaseDepthDataset(Dataset):
 
     def _get_data_item(self, index):
         rgb_rel_path, depth_rel_path, filled_rel_path = self._get_data_path(index=index)
-
+        print(rgb_rel_path)
         rasters = {}
 
         # RGB data
@@ -150,6 +151,8 @@ class BaseDepthDataset(Dataset):
         return rasters, other
 
     def _load_rgb_data(self, rgb_rel_path):
+        print(f'BaseDepthDataset _load_rgb_data: {rgb_rel_path}')
+        
         # Read RGB data
         rgb = self._read_rgb_file(rgb_rel_path)
         rgb_norm = rgb / 255.0 * 2.0 - 1.0  #  [0, 255] -> [-1, 1]
@@ -190,6 +193,8 @@ class BaseDepthDataset(Dataset):
         return rgb_rel_path, depth_rel_path, filled_rel_path
 
     def _read_image(self, img_rel_path) -> np.ndarray:
+        print(f'BaseDepthDataset _read_image: {img_rel_path}')
+
         if self.is_tar:
             if self.tar_obj is None:
                 self.tar_obj = tarfile.open(self.dataset_dir)
@@ -203,6 +208,8 @@ class BaseDepthDataset(Dataset):
         return image
 
     def _read_rgb_file(self, rel_path) -> np.ndarray:
+        print(f'BaseDepthDataset _load_rgb_file: {rel_path}')
+        
         rgb = self._read_image(rel_path)
         rgb = np.transpose(rgb, (2, 0, 1)).astype(int)  # [rgb, H, W]
         return rgb

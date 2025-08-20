@@ -121,6 +121,7 @@ class MarigoldPipeline(DiffusionPipeline):
         shift_invariant: Optional[bool] = True,
         default_denoising_steps: Optional[int] = None,
         default_processing_resolution: Optional[int] = None,
+        distributional_method: Optional[str] = None,
     ):
         super().__init__()
         self.register_modules(
@@ -141,6 +142,7 @@ class MarigoldPipeline(DiffusionPipeline):
         self.shift_invariant = shift_invariant
         self.default_denoising_steps = default_denoising_steps
         self.default_processing_resolution = default_processing_resolution
+        self.distributional_method = distributional_method
 
         self.empty_text_embed = None
 
@@ -431,10 +433,14 @@ class MarigoldPipeline(DiffusionPipeline):
             )  # this order is important
 
             # predict the noise residual
-            noise_pred = self.unet(
-                unet_input, t, encoder_hidden_states=batch_empty_text_embed
-            ).sample  # [B, 4, h, w]
-
+            output = self.unet(
+                        unet_input, t, encoder_hidden_state=batch_empty_text_embed
+                    )
+            if self.distributional_method == 'deterministic':
+                noise_pred = output.sample  # [B, 4, h, w]
+            else:
+                noise_pred = output.sample_noise_pred()  # [B, 4, h, w]
+                
             # compute the previous noisy sample x_t -> x_t-1
             depth_latent = self.scheduler.step(
                 noise_pred, t, depth_latent, generator=generator

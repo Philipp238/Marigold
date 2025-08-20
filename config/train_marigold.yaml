@@ -51,13 +51,23 @@ gt_mask_type: valid_mask_raw
 max_epoch: 10000  # a large enough number
 max_iter: 30000  # usually converges at around 20k
 
+# Diffusion UQ settings 
+# diffusionUQ:
+#   distributional_method: normal
+#   mvnormal_method: lora
+
+
 optimizer:
   name: Adam
 
 loss:
-  name: mse_loss
+  name: crps # mse_loss, crps, 
   kwargs:
     reduction: mean
+    distributional_method: normal # deterministic, normal
+    mvnormal_method: lora
+    uncertainty_quantification: diffusion
+    gamma: 5
 
 lr: 3.0e-05
 lr_scheduler:
@@ -92,3 +102,6 @@ eval:
   - delta3_acc
   - i_rmse
   - silog_rmse
+  uq_eval_metrics:
+  - energy_score_mask
+  n_distributional_samples: 10
