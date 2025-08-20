@@ -20,6 +20,18 @@ from scoringrules import crps_ensemble, energy_score
 
 EPS = 1e-9
 
+def use_valid_mask(prediction, target, valid_mask):
+    if valid_mask is not None:
+        target = target[valid_mask]
+        prediction = prediction[:,valid_mask]
+        n = valid_mask.sum((-1, -2))
+    else:
+        n = prediction.shape[-1] * prediction.shape[-2]
+        target = target.flatten()
+        prediction = prediction.flatten(start_dim=1)
+
+    return prediction, target, n
+
 
 class GaussianKernelScore(nn.Module):
     """Computes the Gaussian kernel score for a predictive normal distribution and corresponding observations."""
@@ -139,19 +151,6 @@ class GaussianKernelScore(nn.Module):
             return score
 
 
-def use_valid_mask(prediction, target, valid_mask):
-    if valid_mask is not None:
-        target = target[valid_mask]
-        prediction = prediction[:,valid_mask]
-        n = valid_mask.sum((-1, -2))
-    else:
-        n = prediction.shape[-1] * prediction.shape[-2]
-        target = target.flatten()
-        prediction = prediction.flatten(start_dim=1)
-
-    return prediction, target, n
-
-
 class QICE(nn.Module):
     """Implements QICE metric for quantile calibration.
 
@@ -199,51 +198,6 @@ class QICE(nn.Module):
         # Compute QICE
         qice = torch.abs(torch.ones(self.n_bins) / self.n_bins - quantile_ratio).mean()
         return qice.item()
-
-
-class NormalCRPS(nn.Module):
-    """Computes the continuous ranked probability score (CRPS) for a predictive normal distribution and corresponding observations.
-
-    Args:
-        observation (Tensor): Observed outcome. Shape = [batch_size, d0, .. dn].
-        mu (Tensor): Predicted mu of normal distribution. Shape = [batch_size, d0, .. dn].
-        sigma (Tensor): Predicted sigma of normal distribution. Shape = [batch_size, d0, .. dn].
-        reduce (bool, optional): Boolean value indicating whether reducing the loss to one value or to
-            a Tensor with shape = `[batch_size]`.
-        reduction (str, optional): Specifies the reduction to apply to the output:
-            ``'mean'`` | ``'sum'``.
-    Raises:
-        ValueError: If sizes of target mu and sigma don't match.
-
-    Returns:
-        quantile_score: 1-D float `Tensor` with shape [batch_size] or Float if reduction = True
-
-    References:
-      - Gneiting, T. et al., 2005: Calibrated Probabilistic Forecasting Using Ensemble Model Output Statistics and Minimum CRPS Estimation. Mon. Wea. Rev., 133, 1098–1118
-    """
-
-    def __init__(
-        self,
-        reduction="mean",
-    ) -> None:
-        super().__init__()
-        self.reduction = reduction
-
-    def forward(self, observation: Tensor, mu: Tensor, sigma: Tensor) -> Tensor:
-        if not (mu.size() == sigma.size() == observation.size()):
-            raise ValueError("Mismatching target and prediction shapes")
-        # Use absolute value of sigma
-        sigma = torch.abs(sigma) + EPS
-        loc = (observation - mu) / sigma
-        Phi = 0.5 * (1 + torch.special.erf(loc / np.sqrt(2.0)))
-        phi = 1 / (np.sqrt(2.0 * np.pi)) * torch.exp(-torch.pow(loc, 2) / 2.0)
-        crps = sigma * (loc * (2.0 * Phi - 1) + 2.0 * phi - 1 / np.sqrt(np.pi))
-        if self.reduction == "sum":
-            return torch.sum(crps)
-        elif self.reduction == "mean":
-            return torch.mean(crps)
-        else:
-            return crps
 
 
 class NormalMixtureCRPS(nn.Module):
@@ -466,225 +420,16 @@ def energy_score_mask(ensemble, target, valid_mask):
         )
     return es
 
+def gaussiannll_mask(ensemble, target, valid_mask):
+    ensemble, target, n = use_valid_mask(ensemble, target, valid_mask)
+    ensemble = ensemble.permute(1, 0)  # Ensemble dimension is the last dimension
+    return GaussianNLL(reduce_dims=False)(ensemble, target)
 
-
-class EnergyScore(object):
-    """
-    A class for calculating the energy score between two tensors.
-    """
-
-    def __init__(
-        self,
-        d: int = 1,
-        type: str = "lp",
-        reduction: str = "mean",
-        reduce_dims: bool = True,
-        **kwargs: dict,
-    ):
-        """Initializes the Energy score class.
-
-        Args:
-            d (int, optional): Dimension of the domain. Defaults to 1.
-            type (str, optional): Type of metric to apply. Defaults to "lp".
-            reduction (str, optional): Which reduction should be applied. Defaults to "mean".
-            reduce_dims (List, optional): Which dimensions to reduce loss across. Defaults to [0].
-            rel (bool, optional): Whether to calculate relative or absolute loss. Defaults to False.
-        """
-        super().__init__()
-        self.d = d
-        self.type = type
-        self.reduction = reduction
-        self.reduce_dims = reduce_dims
-        self.rel = kwargs.get("rel", False)
-        self.p = kwargs.get("p", 2)
-        self.L = kwargs.get("L", 1.0)
-        # Arguments for spherical score
-        if self.type == "spherical":
-            self.nlon = kwargs.get("nlon", 256)
-            self.weights = kwargs.get("weights", 1)
-            self.dlon = 1 / self.nlon
-            self.p = 2
-            self.d = 2
-
-        if isinstance(self.L, float):
-            self.L = [self.L] * self.d
-
-        self.norm = lp_norm
-
-    def reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """Reduces the tensor across all dimensions specified in reduce_dims.
-
-        Args:
-            x (torch.Tensor): Input tensor
-
-        Returns:
-            torch.Tensor: Reduced tensor
-        """
-        if self.reduction == "sum":
-            x = torch.sum(x, dim=0, keepdim=True)
-        else:
-            x = torch.mean(x, dim=0, keepdim=True)
-        return x
-
-    def uniform_h(self, x: torch.Tensor) -> float:
-        """Calculates the integration constant for uniform mesh.
-
-        Args:
-            x (torch.Tensor): Input tensor
-
-        Returns:
-            float: Integration constant
-        """
-        h = [0.0] * self.d
-        for j in range(self.d, 0, -1):
-            h[-j] = self.L[-j] / x.size(-j - 1)
-        return h
-
-    def calculate_score(self, x: torch.Tensor, y: torch.Tensor, h=None) -> torch.Tensor:
-        """Calculates the energy score between two tensors for different metrics.
-
-        Args:
-            x (torch.Tensor): Model prediction (Batch size, ..., n_samples)
-            y (torch.Tensor): Target (Batch size, ..., 1)
-            h (_type_, optional): Integration constant. Defaults to None.
-
-        Returns:
-            torch.Tensor: Energy score
-        """
-        n_samples = x.size()[-1]
-
-        # Assume uniform mesh
-        if h is None:
-            h = self.uniform_h(x)
-        else:
-            if isinstance(h, float):
-                h = [h] * self.d
-
-        # Add additional dimension if necessary
-        if len(x.size()) != len(y.size()):
-            y = y.unsqueeze(-1)
-
-        if self.type == "spherical":
-            weights = self.weights.unsqueeze(-1) / self.weights.sum()
-            x = x * torch.sqrt(weights * self.dlon)
-            y = y * torch.sqrt(weights * self.dlon)
-
-        # Restructure tensors to shape (Batch size, n_samples, flatted dims)
-        x_flat = torch.swapaxes(torch.flatten(x, start_dim=1, end_dim=-2), 1, 2)
-        y_flat = torch.swapaxes(torch.flatten(y, start_dim=1, end_dim=-2), 1, 2)
-
-        # Assume uniform mesh
-        if self.type == "lp":
-            const = torch.tensor(
-                np.array(math.prod(h) ** (1.0 / self.p)), device=x.device
-            )
-        else:
-            const = 1.0
-
-        # Calculate energy score
-        term_1 = torch.mean(
-            self.norm(x_flat, y_flat, const=const, p=self.p), dim=(1, 2)
-        )
-        term_2 = torch.sum(self.norm(x_flat, x_flat, const=const, p=self.p), dim=(1, 2))
-
-        if self.rel:
-            ynorm = (
-                const
-                * torch.norm(
-                    torch.flatten(y_flat, start_dim=-1), p=self.p, dim=-1, keepdim=False
-                ).squeeze()
-            )
-            term_1 = term_1 / ynorm
-            term_2 = term_2 / ynorm
-
-        score = term_1 - term_2 / (2 * n_samples * (n_samples - 1))
-
-        # Reduce
-        return self.reduce(score).squeeze() if self.reduce_dims else score
-
-    def __call__(self, y_pred, y, **kwargs):
-        return self.calculate_score(y_pred, y, **kwargs)
-
-
-class CRPS(object):
-    """
-    A class for calculating the Continuous Ranked Probability Score (CRPS) between two tensors.
-    """
-
-    def __init__(
-        self, reduction: str = "mean", reduce_dims: bool = True, **kwargs: dict
-    ):
-        """Initializes the CRPS class.
-
-        Args:
-            reduction (str, optional): Which reduction to apply. Defaults to "mean".
-            reduce_dims (bool, optional): Which dimensions to reduce. Defaults to True.
-        """
-        super().__init__()
-        self.reduction = reduction
-        self.reduce_dims = reduce_dims
-        # Kwargs for spherical loss
-        self.nlon = kwargs.get("nlon", 256)
-        self.nlat = self.nlon / 2
-        self.weights = kwargs.get("weights", None)
-        self.dlon = 1 / self.nlon
-
-    def reduce(self, x: torch.Tensor) -> torch.Tensor:
-        """Reduces the tensor across all dimensions specified in reduce_dims.
-
-        Args:
-            x (torch.Tensor): Input tensor
-
-        Returns:
-            torch.Tensor: Reduced tensor
-        """
-        if self.reduction == "sum":
-            x = torch.sum(x, dim=0, keepdim=True)
-        else:
-            x = torch.mean(x, dim=0, keepdim=True)
-        return x
-
-    def calculate_score(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Calculates the CRPS for two tensors.
-
-        Args:
-            x (torch.Tensor): Model prediction (Batch size, ..., n_samples)
-            y (torch.Tensor): Target (Batch size, ..., 1)
-
-        Returns:
-            torch.Tensor: CRPS
-        """
-        n_samples = x.size()[-1]
-
-        # Add additional dimension if necessary
-        if len(x.size()) != len(y.size()):
-            y = torch.unsqueeze(y, dim=-1)
-
-        # Dimensions of the input
-        d = torch.prod(torch.tensor(x.shape[1:-1]))
-        # Adjust weights for spherical grid
-        if self.weights is not None:
-            weights = self.weights / self.weights.sum()
-            weights = weights.unsqueeze(-1) * self.dlon / (d / (self.nlon * self.nlat))
-        else:
-            weights = 1 / d
-        x = x * weights
-        y = y * weights
-
-        # Restructure tensors to shape (Batch size, n_samples, flatted dims)
-        x_flat = torch.swapaxes(torch.flatten(x, start_dim=1, end_dim=-2), 1, 2)
-        y_flat = torch.swapaxes(torch.flatten(y, start_dim=1, end_dim=-2), 1, 2)
-
-        # Calculate energy score
-        term_1 = torch.mean(torch.cdist(x_flat, y_flat, p=1), dim=(1, 2))  # /d
-        term_2 = torch.sum(torch.cdist(x_flat, x_flat, p=1), dim=(1, 2))  # /d
-
-        score = term_1 - term_2 / (2 * n_samples * (n_samples - 1))
-        # Reduce
-        return self.reduce(score).squeeze() if self.reduce_dims else score
-
-    def __call__(self, y_pred, y, **kwargs):
-        return self.calculate_score(y_pred, y, **kwargs)
+def coverage_mask(ensemble, target, valid_mask):
+    alpha = 0.05
+    ensemble, target, n = use_valid_mask(ensemble, target, valid_mask)
+    ensemble = ensemble.permute(1, 0)  # Ensemble dimension is the last dimension
+    return Coverage(alpha=alpha, reduce_dims=False)(ensemble, target)
 
 
 class GaussianNLL(object):
@@ -726,7 +471,7 @@ class GaussianNLL(object):
 
         Args:
             x (torch.Tensor): Model prediction (Batch size, ..., n_samples)
-            y (torch.Tensor): Target (Batch size, ..., 1)
+            y (torch.Tensor): Target (Batch size, ...)
 
         Returns:
             torch.Tensor: Gaussian negative log likelihood
