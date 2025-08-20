@@ -423,13 +423,19 @@ def energy_score_mask(ensemble, target, valid_mask):
 def gaussiannll_mask(ensemble, target, valid_mask):
     ensemble, target, n = use_valid_mask(ensemble, target, valid_mask)
     ensemble = ensemble.permute(1, 0)  # Ensemble dimension is the last dimension
-    return GaussianNLL(reduce_dims=False)(ensemble, target)
+    score = GaussianNLL(reduce_dims=True, reduction='mean')(ensemble, target)
+    return score
 
 def coverage_mask(ensemble, target, valid_mask):
     alpha = 0.05
     ensemble, target, n = use_valid_mask(ensemble, target, valid_mask)
     ensemble = ensemble.permute(1, 0)  # Ensemble dimension is the last dimension
-    return Coverage(alpha=alpha, reduce_dims=False)(ensemble, target)
+    return Coverage(alpha=alpha, reduce_dims=True)(ensemble, target)
+
+def crps_mask(ensemble, target, valid_mask):
+    ensemble, target, n = use_valid_mask(ensemble, target, valid_mask)
+    score = crps_ensemble(target.cpu(), ensemble.cpu(), m_axis=0, backend="torch").mean()
+    return score
 
 
 class GaussianNLL(object):
@@ -489,9 +495,6 @@ class GaussianNLL(object):
         gaussian = torch.distributions.Normal(mu, sigma)
         score = -gaussian.log_prob(y)
 
-        if self.reduce_dims:
-            # Aggregate CRPS over spatial dimensions
-            score = score.mean(dim=[d for d in range(1, n_dims + 1)])
         # Reduce
         return self.reduce(score).squeeze() if self.reduce_dims else score
 
@@ -569,9 +572,6 @@ class Coverage(object):
             weights = (self.weights / self.weights.sum()) * self.weights.size(0)
             score = score * weights
 
-        if self.reduce_dims:
-            # Aggregate over spatial and channel dimensions
-            score = score.mean(dim=[d for d in range(1, n_dims + 1)])
         # Reduce
         return self.reduce(score).squeeze() if self.reduce_dims else score
 

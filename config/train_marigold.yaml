@@ -37,7 +37,7 @@ trainer:
   init_seed: 2024  # use null to train w/o seeding
   save_period: 50
   backup_period: 2000
-  validation_period: 1
+  validation_period: 2000
   visualization_period: 2000
 
 multi_res_noise:
@@ -106,4 +106,5 @@ eval:
   - energy_score_mask
   - gaussiannll_mask
   - coverage_mask
+  - crps_mask
   n_distributional_samples: 10
