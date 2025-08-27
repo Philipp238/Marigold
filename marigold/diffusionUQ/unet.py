@@ -156,8 +156,8 @@ class UNet_diffusion_normal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # backbone.config["out_channels"] = 2 * out_channels
         # logging.info("Unet config is updated")
 
-    def forward(self, x_t, t, encoder_hidden_state, **kwargs):
-        x_t = self.backbone(x_t, t, encoder_hidden_state).sample
+    def forward(self, x_t, t, encoder_hidden_states, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_states).sample
 
         mu = self.mu_projection(x_t)
         sigma = self.sigma_projection(x_t)

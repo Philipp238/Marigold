@@ -434,7 +434,7 @@ class MarigoldPipeline(DiffusionPipeline):
 
             # predict the noise residual
             output = self.unet(
-                        unet_input, t, encoder_hidden_state=batch_empty_text_embed
+                        unet_input, t, encoder_hidden_states=batch_empty_text_embed
                     )
             if self.distributional_method == 'deterministic':
                 noise_pred = output.sample  # [B, 4, h, w]
