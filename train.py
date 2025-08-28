@@ -89,12 +89,12 @@ if "__main__" == __name__:
         help="On Slurm cluster, do not copy data to local scratch",
     )
     parser.add_argument(
-        "--base_data_dir", type=str, default=None, help="directory of training data"
+        "--base_data_dir", type=str, default="/scratch/scholl/diffusion/marigold_data/", help="directory of training data"
     )
     parser.add_argument(
         "--base_ckpt_dir",
         type=str,
-        default=None,
+        default="/home/groups/ai/scholl/diffusion/models/",
         help="directory of pretrained checkpoint",
     )
     parser.add_argument(
@@ -107,20 +107,17 @@ if "__main__" == __name__:
     args = parser.parse_args()
     resume_run = args.resume_run
     output_dir = args.output_dir
-    # base_data_dir = (
-    #     args.base_data_dir
-    #     if args.base_data_dir is not None
-    #     else os.environ["BASE_DATA_DIR"]
-    # )
-    # base_ckpt_dir = (
-    #     args.base_ckpt_dir
-    #     if args.base_ckpt_dir is not None
-    #     else os.environ["BASE_CKPT_DIR"]
-    # )
+    base_data_dir = (
+        args.base_data_dir
+        if args.base_data_dir is not None
+        else os.environ["BASE_DATA_DIR"]
+    )
+    base_ckpt_dir = (
+        args.base_ckpt_dir
+        if args.base_ckpt_dir is not None
+        else os.environ["BASE_CKPT_DIR"]
+    )
 
-    USER = "kneissl"
-    base_data_dir = f"/scratch/{USER}/diffusion/marigold_data/"
-    base_ckpt_dir = "/home/groups/ai/scholl/diffusion/models/"
 
     # -------------------- Initialization --------------------
     # Resume previous run
