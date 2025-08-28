@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
+from marigold.diffusionUQ.unet import UNet_diffusion_normal
 from src.util.seeding import seed_all
 from src.dataset import (
     BaseDepthDataset,
@@ -203,10 +204,32 @@ if "__main__" == __name__:
         dtype = torch.float32
         variant = None
 
+    unet_normal = UNet_diffusion_normal.from_pretrained(
+        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
+    )
+
+    from diffusers import UNet2DConditionModel
+    
+    unet = UNet2DConditionModel.from_pretrained(
+        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
+    )
+
+    # TODO: Check that everything is correct
     pipe = MarigoldPipeline.from_pretrained(
         checkpoint_path, variant=variant, torch_dtype=dtype
     )
 
+    
+    backbone = UNet2DConditionModel.from_pretrained(
+        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
+    )
+
+    unet = UNet_diffusion_normal(backbone=backbone)
+    # Modify unet
+    weights = torch.load("output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet/diffusion_pytorch_model.bin")
+
+    unet.load_state_dict(weights)
+    pipe.unet = unet
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except ImportError:
@@ -228,19 +251,25 @@ if "__main__" == __name__:
             input_image = Image.fromarray(rgb_int)
 
             # Predict depth
-            pipe_out = pipe(
-                input_image,
-                denoising_steps=denoise_steps,
-                ensemble_size=ensemble_size,
-                processing_res=processing_res,
-                match_input_res=match_input_res,
-                batch_size=0,
-                color_map=None,
-                show_progress_bar=False,
-                resample_method=resample_method,
-            )
+            ensemble_preds = []
+            for _ in range(ensemble_size):
+                pipe_out = pipe(
+                    input_image,
+                    denoising_steps=denoise_steps,
+                    ensemble_size=1,
+                    processing_res=processing_res,
+                    match_input_res=match_input_res,
+                    batch_size=0,
+                    color_map=None,
+                    show_progress_bar=False,
+                    resample_method=resample_method,
+                    )
 
-            depth_pred: np.ndarray = pipe_out.depth_np
+                depth_pred: np.ndarray = pipe_out.depth_np
+
+                ensemble_preds.append(depth_pred.expand_dims(axis=0))  # [1, H, W]
+
+            ensemble_preds = np.concatenate(ensemble_preds, axis=0)  # [N, H, W]
 
             # Save predictions
             rgb_filename = batch["rgb_relative_path"][0]
@@ -255,4 +284,4 @@ if "__main__" == __name__:
             if os.path.exists(save_to):
                 logging.warning(f"Existing file: '{save_to}' will be overwritten")
 
-            np.save(save_to, depth_pred)
+            np.save(save_to, ensemble_preds)
