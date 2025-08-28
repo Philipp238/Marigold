@@ -52,7 +52,7 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
-from marigold.diffusionUQ.unet import UNet_diffusion_normal
+from marigold.diffusionUQ.unet import UNet_diffusion_normal, UNet_diffusion_mvnormal
 
 class MarigoldTrainer:
     def __init__(
@@ -92,6 +92,13 @@ class MarigoldTrainer:
         if distributional_method == 'normal':
             conv_out = self._remove_unet_conv_out()
             unet_diffusion = UNet_diffusion_normal(
+                backbone=self.model.unet,
+                conv_out=conv_out
+            )
+            self.model.unet = unet_diffusion
+        elif distributional_method == 'mvnormal':
+            conv_out = self._remove_unet_conv_out()
+            unet_diffusion = UNet_diffusion_mvnormal(
                 backbone=self.model.unet,
                 conv_out=conv_out
             )

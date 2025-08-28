@@ -231,18 +231,21 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.mu_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels,
-            kernel=1
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding,
         )
         self.sigma_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=sigma_out_channels,
-            kernel=1,
-            init_bias=1,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding
         )
         self.softplus = nn.Softplus()
 
     def forward(self, x_t, t, encoder_hidden_state, **kwargs):
-        x_t = self.backbone.forward_body(x_t, t, encoder_hidden_state).sample
+        x_t = self.backbone(x_t, t, encoder_hidden_state).sample
 
         mu = self.mu_projection(x_t).unsqueeze(-1)
         sigma = self.sigma_projection(x_t)
@@ -271,7 +274,7 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             # L[:, torch.arange(self.domain_dim), torch.arange(self.domain_dim)] = diag.squeeze()
             # L = L.unsqueeze(1)
             # output = torch.cat([mu, L], dim=-1)
-        return output
+        return UNetMvNormalOutput(output)
 
 
 class UNet_diffusion_sample(nn.Module):
