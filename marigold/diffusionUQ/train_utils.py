@@ -14,7 +14,8 @@ def get_criterion(training_parameters):
     """Define criterion for the model.
     Criterion gets as arguments (truth, prediction) and returns a loss value.
     """
-    method = training_parameters["mvnormal_method"]
+    # Hard-code lora for now, as Cholesky is not implemented
+    method = "lora" # training_parameters["mvnormal_method"]
     loss = training_parameters["loss"]
     if training_parameters["uncertainty_quantification"] == "diffusion":
         if training_parameters["distributional_method"] == "deterministic":

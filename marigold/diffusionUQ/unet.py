@@ -28,6 +28,7 @@ from torch import nn
 
 from torch.nn import Conv2d
 from torch.nn import Parameter
+from torch.distributions.lowrank_multivariate_normal import LowRankMultivariateNormal
 from diffusers.models.unets.unet_2d_condition import UNet2DConditionOutput
 
 from diffusers.models.modeling_utils import ModelMixin
@@ -39,6 +40,41 @@ class UNetNormalOutput(UNet2DConditionOutput):
     def sample_noise_pred(self) -> torch.Tensor:
         noise_pred = self.sample[...,0] + self.sample[...,1] *  torch.randn_like(self.sample[..., 0], device=self.sample.device)
         return noise_pred
+
+@dataclass
+class UNetMvNormalOutput(UNet2DConditionOutput):
+    def sample_noise_pred(self) -> torch.Tensor:
+        predicted_noise_mu = self.sample[..., 0]
+        diag = self.sample[..., 1]
+        lora = self.sample[..., 2:]
+        mvnorm = LowRankMultivariateNormal(
+            predicted_noise_mu, lora, diag
+        )
+        noise_pred = mvnorm.sample()
+
+        return noise_pred
+
+@dataclass
+class UNetMvMixedNormalOutput(UNet2DConditionOutput):
+    def sample_noise_pred(self) -> torch.Tensor:
+        mu = self.sample[..., 0]
+        sigma = self.sample[..., 1]
+        weights = self.sample[..., 2]
+        sampled_weights = torch.distributions.Categorical(weights).sample()
+
+        predicted_noise_mu = torch.gather(
+            mu, dim=-1, index=sampled_weights.unsqueeze(-1)
+        ).squeeze(-1)
+        predicted_noise_sigma = torch.gather(
+            sigma, dim=-1, index=sampled_weights.unsqueeze(-1)
+        ).squeeze(-1)
+
+        predicted_noise = predicted_noise_mu + predicted_noise_sigma * torch.randn_like(
+            predicted_noise_mu, device=self.device
+        )
+        predicted_noise = predicted_noise.squeeze(-1)
+
+        return predicted_noise
 
 
 EPS = 1e-6
@@ -166,104 +202,117 @@ class UNet_diffusion_normal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         return UNetNormalOutput(output)
 
 
-class UNet_diffusion_mvnormal(nn.Module):
-    def __init__(self, backbone, d=1, target_dim=1, domain_dim=128, method="lora", rank=3):
+class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+    def __init__(self, backbone, conv_out, method="lora", rank=3):
         super(UNet_diffusion_mvnormal, self).__init__()
-        self.backbone = backbone
-        hidden_dim = backbone.features
-        self.method = method
-        self.target_dim = target_dim
-        self.domain_dim = domain_dim[-1]
-        if method == "lora":
-            sigma_out_channels = target_dim * (rank + 1)  # Rank + diagonal
-        elif method == "cholesky":
-            # Covariance buffer
-            self.register_buffer(
-                "tril_template",
-                torch.zeros(self.domain_dim, self.domain_dim, dtype=torch.int64),
-            )
-            self.register_buffer(
-                "tril_indices", torch.tril_indices(self.domain_dim, self.domain_dim)
-            )
-            self.tril_template[self.tril_indices.tolist()] = torch.arange(
-                self.tril_indices.shape[1]
-            )
-            self.num_tril_params = self.tril_indices.shape[1]
-            sigma_out_channels = (self.domain_dim)//2 +1
-        if d == 1:
-            self.mu_projection = Conv1d(
-                in_channels=hidden_dim, out_channels=self.target_dim, kernel=1
-            )
-            self.sigma_projection = Conv1d(
-                in_channels=hidden_dim,
-                out_channels=sigma_out_channels,
-                kernel=1,
-                init_bias=1,
-            )
-        elif d == 2:
-            self.mu_projection = Conv2d(
-                in_channels=hidden_dim, out_channels=self.target_dim, kernel=1
-            )
-            self.sigma_projection = Conv2d(
-                in_channels=hidden_dim,
-                out_channels=sigma_out_channels,
-                kernel=1,
-                init_bias=1,
-            )
-        self.sofplus = nn.Softplus()
+        self.backbone = backbone  # The UNet without the final conv_out layer
+        self.in_channels = conv_out.in_channels
+        self.out_channels = conv_out.out_channels
 
-    def forward(self, x_t, t, condition_input, **kwargs):
-        x_t = self.backbone.forward_body(x_t, t, condition_input)
+        self.method = method
+        if method == "lora":
+            sigma_out_channels = self.out_channels * (rank + 1)  # Rank + diagonal
+        elif method == "cholesky":
+            raise NotImplementedError("Cholesky is currently not implemented for image data")
+            # # Covariance buffer
+            # self.register_buffer(
+            #     "tril_template",
+            #     torch.zeros(self.domain_dim, self.domain_dim, dtype=torch.int64),
+            # )
+            # self.register_buffer(
+            #     "tril_indices", torch.tril_indices(self.domain_dim, self.domain_dim)
+            # )
+            # self.tril_template[self.tril_indices.tolist()] = torch.arange(
+            #     self.tril_indices.shape[1]
+            # )
+            # self.num_tril_params = self.tril_indices.shape[1]
+            # sigma_out_channels = (self.domain_dim)//2 +1
+
+        self.mu_projection = Conv2d(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding,
+        )
+        self.sigma_projection = Conv2d(
+            in_channels=self.in_channels,
+            out_channels=sigma_out_channels,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding
+        )
+        self.softplus = nn.Softplus()
+
+    def forward(self, x_t, t, encoder_hidden_state, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_state).sample
 
         mu = self.mu_projection(x_t).unsqueeze(-1)
         sigma = self.sigma_projection(x_t)
         if self.method == "lora":
-            diag = self.sofplus(sigma[:, 0 : self.target_dim]).unsqueeze(-1) + EPS
-            lora = sigma[:, self.target_dim :]
+            diag = self.softplus(sigma[:, 0 : self.out_channels]).unsqueeze(-1) + EPS
+            lora = sigma[:, self.out_channels :,:,:]
             lora = lora.reshape(
-                lora.shape[0], self.target_dim, -1, *lora.shape[2:]
+                lora.shape[0],
+                self.out_channels,
+                -1,
+                *lora.shape[2:]
             ).moveaxis(2, -1)
-            lora = lora/(torch.norm(lora, dim=(-2,-1), keepdim=True) + EPS)
+            lora = lora/(torch.norm(lora, dim=(-2,-1), keepdim=True) + EPS) # Normalize over only one of the image dimensions
             output = torch.cat([mu, diag, lora], dim=-1)
 
         elif self.method == "cholesky":
+            raise NotImplementedError("Cholesky is currently not implemented for image data")
             # Initialize full zero matrix and fill lower triangle
-            L_full = torch.zeros(mu.shape[0], self.domain_dim, self.domain_dim, device=x_t.device)
-            L_full[:, self.tril_indices[0], self.tril_indices[1]] = sigma.flatten(start_dim = 1)[:,0:self.tril_indices[0].shape[0]]
+            # L_full = torch.zeros(mu.shape[0], self.domain_dim, self.domain_dim, device=x_t.device)
+            # L_full[:, self.tril_indices[0], self.tril_indices[1]] = sigma.flatten(start_dim = 1)[:,0:self.tril_indices[0].shape[0]]
 
-            # Enforce positive diagonal via softplus()
-            diag = nn.functional.softplus(torch.diagonal(L_full, dim1=-2, dim2=-1)) + EPS
-            L = torch.tril(L_full)
-            L = L/(torch.norm(L, dim=-1, keepdim=True) + EPS)
-            L[:, torch.arange(self.domain_dim), torch.arange(self.domain_dim)] = diag.squeeze()
-            L = L.unsqueeze(1)
-            output = torch.cat([mu, L], dim=-1)
-        return output
+            # # Enforce positive diagonal via softplus()
+            # diag = nn.functional.softplus(torch.diagonal(L_full, dim1=-2, dim2=-1)) + EPS
+            # L = torch.tril(L_full)
+            # L = L/(torch.norm(L, dim=-1, keepdim=True) + EPS)
+            # L[:, torch.arange(self.domain_dim), torch.arange(self.domain_dim)] = diag.squeeze()
+            # L = L.unsqueeze(1)
+            # output = torch.cat([mu, L], dim=-1)
+        return UNetMvNormalOutput(output)
 
 
 class UNet_diffusion_sample(nn.Module):
-    def __init__(self, backbone, d=1, target_dim=1, hidden_dim=32, n_samples=50):
+    def __init__(self, backbone, conv_out, n_samples=50):
         super(UNet_diffusion_sample, self).__init__()
-        self.backbone = backbone
-
-        # Concatenate noise with channel
-        self.backbone.input_projection = nn.Linear(target_dim + 1, hidden_dim)
+        self.backbone = backbone  # The UNet without the final conv_out layer
+        self.in_channels = conv_out.in_channels
+        self.out_channels = conv_out.out_channels
 
         self.n_samples = n_samples
 
-    def forward(self, x_t, t, condition_input, n_samples=None, **kwargs):
+    def _expand(self, x, n_samples):
+        if len(x.shape) > 1:
+            return torch.repeat_interleave(
+                x.unsqueeze(1), n_samples, dim=1
+            ).reshape(x.shape[0] * n_samples, *x.shape[1:])
+        else:
+            return torch.repeat_interleave(
+                x.unsqueeze(1), n_samples, dim=1
+            ).reshape(x.shape[0] * n_samples)
+        
+
+    def forward(self, x_t, t, encoder_hidden_state, n_samples=None, **kwargs):
         if n_samples is None:
             n_samples = self.n_samples
 
-        x_t_expanded = torch.repeat_interleave(
-            x_t.unsqueeze(1), n_samples, dim=1
-        ).reshape(x_t.shape[0] * n_samples, *x_t.shape[1:])
-        t_expanded = torch.repeat_interleave(
-            t.unsqueeze(-1), n_samples, dim=-1
-        ).reshape(t.shape[0] * n_samples)
-        condition_input_expanded = torch.repeat_interleave(
-            condition_input.unsqueeze(1), n_samples, dim=1
-        ).reshape(condition_input.shape[0] * n_samples, *condition_input.shape[1:])
+        x_t_expanded = self._expand(x_t_expanded, n_samples)
+        t_expanded = self._expand(t_expanded, n_samples)
+        condition_input_expanded = self._expand(condition_input_expanded, n_samples)
+        # x_t_expanded = torch.repeat_interleave(
+        #     x_t.unsqueeze(1), n_samples, dim=1
+        # ).reshape(x_t.shape[0] * n_samples, *x_t.shape[1:])
+        # t_expanded = torch.repeat_interleave(
+        #     t.unsqueeze(-1), n_samples, dim=-1
+        # ).reshape(t.shape[0] * n_samples)
+        # condition_input_expanded = torch.repeat_interleave(
+        #     condition_input.unsqueeze(1), n_samples, dim=1
+        # ).reshape(condition_input.shape[0] * n_samples, *condition_input.shape[1:])
 
         # Concatenate noise
         noise = torch.randn_like(x_t_expanded)
@@ -272,76 +321,60 @@ class UNet_diffusion_sample(nn.Module):
         output = self.backbone.forward(
             x_t_expanded,
             t_expanded,
-            condition_input_expanded,
-        )
+            encoder_hidden_state,
+        ).sample
         output = output.reshape(x_t.shape[0], n_samples, *output.shape[1:])
         return torch.moveaxis(output, 1, -1)  # Move sample dimension to last position
 
 
-class UNet_diffusion_mixednormal(nn.Module):
-    def __init__(self, backbone, d=1, target_dim=1, n_components=3):
+class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+    def __init__(self, backbone, conv_out, n_components=3):
         super(UNet_diffusion_mixednormal, self).__init__()
-        self.backbone = backbone
-        hidden_dim = backbone.features
+        self.backbone = backbone  # The UNet without the final conv_out layer
+        self.in_channels = conv_out.in_channels
+        self.out_channels = conv_out.out_channels
+
         self.n_components = n_components
-        self.target_dim = target_dim
 
-        if d == 1:
-            self.mu_projection = Conv1d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-            )
-            self.sigma_projection = Conv1d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-                init_bias=1,
-            )
-            self.weights_projection = Conv1d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-            )
-        elif d == 2:
-            self.mu_projection = Conv2d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-            )
-            self.sigma_projection = Conv2d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-                init_bias=1,
-            )
-            self.weights_projection = Conv2d(
-                in_channels=hidden_dim,
-                out_channels=target_dim * n_components,
-                kernel=1,
-            )
+        self.mu_projection = Conv2d(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels * n_components,
+            kernel=1,
+        )
+        self.sigma_projection = Conv2d(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels * n_components,
+            kernel=1,
+            init_bias=1,
+        )
+        self.weights_projection = Conv2d(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels * n_components,
+            kernel=1,
+        )
 
-        self.sofplus = nn.Softplus()
+        self.softplus = nn.Softplus()
+    
+    def _reshape_util(self, x):
+        x = x.reshape(
+            x.shape[0], self.out_channels, self.n_components, *x.shape[2:]
+        ).moveaxis(2, -1)
 
-    def forward(self, x_t, t, condition_input, **kwargs):
-        x_t = self.backbone.forward_body(x_t, t, condition_input)
+        return x
+
+    def forward(self, x_t, t, encoder_hidden_state, **kwargs):
+        x_t = self.backbone.forward_body(x_t, t, encoder_hidden_state)
 
         mu = self.mu_projection(x_t)
         sigma = self.sigma_projection(x_t)
         weights = self.weights_projection(x_t)
         # Reshape
-        mu = mu.reshape(
-            mu.shape[0], self.target_dim, self.n_components, *mu.shape[2:]
-        ).moveaxis(2, -1)
-        sigma = sigma.reshape(
-            sigma.shape[0], self.target_dim, self.n_components, *sigma.shape[2:]
-        ).moveaxis(2, -1)
-        weights = weights.reshape(
-            weights.shape[0], self.target_dim, self.n_components, *weights.shape[2:]
-        ).moveaxis(2, -1)
+        mu = self._reshape_util(mu)
+        sigma = self._reshape_util(sigma)
+        weights = self._reshape_util(weights)
 
         # Apply postprocessing
-        sigma = self.sofplus(torch.clamp(sigma, min=-15)) + EPS
+        sigma = self.softplus(torch.clamp(sigma, min=-15)) + EPS
         weights = torch.softmax(torch.clamp(weights, min=-15, max=15), dim=-1)
 
         output = torch.stack([mu, sigma, weights], dim=-1)

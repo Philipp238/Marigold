@@ -61,13 +61,13 @@ optimizer:
   name: Adam
 
 loss:
-  name: crps # mse_loss, crps, 
+  name: kernel # mse_loss, crps, kernel, log
   kwargs:
     reduction: mean
-    distributional_method: normal # deterministic, normal
+    distributional_method: mvnormal # deterministic, normal, mvnormal
     mvnormal_method: lora
     uncertainty_quantification: diffusion
-    gamma: 5
+    gamma: 100
 
 lr: 3.0e-05
 lr_scheduler:
