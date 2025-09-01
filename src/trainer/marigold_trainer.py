@@ -150,7 +150,7 @@ class MarigoldTrainer:
             self.training_noise_scheduler.config.num_train_timesteps
         )
     
-        # Eval metrics (TODO)
+        # Eval metrics
         self.metric_funcs = [getattr(metric, _met) for _met in cfg.eval.eval_metrics]
         self.n_distributional_samples = cfg.eval.n_distributional_samples
         self.uq_metric_funcs = [getattr(losses, _met) for _met in cfg.eval.uq_eval_metrics]

@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
-from marigold.diffusionUQ.unet import UNet_diffusion_normal
+from marigold.diffusionUQ.unet import UNet_diffusion_mvnormal, UNet_diffusion_normal
 from src.util.seeding import seed_all
 from src.dataset import (
     BaseDepthDataset,
@@ -50,9 +50,17 @@ if "__main__" == __name__:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="prs-eth/marigold-v1-0",
+        default="output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet/diffusion_pytorch_model.bin",
         help="Checkpoint path or hub name.",
     )
+
+    parser.add_argument(
+        "--marigold_path",
+        type=str,
+        default="prs-eth/marigold-v1-0",
+        help="Marigold path or hub name.",
+    )
+
 
     # dataset setting
     parser.add_argument(
@@ -115,6 +123,7 @@ if "__main__" == __name__:
 
     args = parser.parse_args()
 
+    marigold_path = args.marigold_path
     checkpoint_path = args.checkpoint
     dataset_config = args.dataset_config
     base_data_dir = args.base_data_dir
@@ -176,6 +185,12 @@ if "__main__" == __name__:
     os.makedirs(output_dir, exist_ok=True)
     logging.info(f"output dir = {output_dir}")
 
+    # -------------------- Config --------------------
+
+    directory = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(checkpoint_path))))
+    config_path = os.path.join(directory, "config.yaml")
+    cfg = OmegaConf.load(config_path)
+
     # -------------------- Device --------------------
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -204,32 +219,36 @@ if "__main__" == __name__:
         dtype = torch.float32
         variant = None
 
-    unet_normal = UNet_diffusion_normal.from_pretrained(
-        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
-    )
 
-    from diffusers import UNet2DConditionModel
     
-    unet = UNet2DConditionModel.from_pretrained(
-        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
-    )
-
-    # TODO: Check that everything is correct
     pipe = MarigoldPipeline.from_pretrained(
-        checkpoint_path, variant=variant, torch_dtype=dtype
+        marigold_path, variant=variant, torch_dtype=dtype
     )
 
+    unet_weights_dict = torch.load(checkpoint_path)
+
+
+    distributional_method = cfg.loss.kwargs.distributional_method
+    if distributional_method == 'deterministic':
+        pipe.unet.load_state_dict(unet_weights_dict)
+    else:
+        old_conv_out = pipe.unet.conv_out
+        pipe.unet.conv_out = torch.nn.Identity()
+        
+        if distributional_method == 'normal':
+            unet_diffusion = UNet_diffusion_normal(
+                backbone=pipe.unet,
+                conv_out=old_conv_out
+            )
+        elif distributional_method == 'mvnormal':
+            unet_diffusion = UNet_diffusion_mvnormal(
+                backbone=pipe.unet,
+                conv_out=old_conv_out
+            )
+        unet_diffusion.load_state_dict(unet_weights_dict)
+        pipe.unet = unet_diffusion
     
-    backbone = UNet2DConditionModel.from_pretrained(
-        "output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet"
-    )
-
-    unet = UNet_diffusion_normal(backbone=backbone)
-    # Modify unet
-    weights = torch.load("output/25_08_20-17_06_23-train_marigold/checkpoint/iter_012000/unet/diffusion_pytorch_model.bin")
-
-    unet.load_state_dict(weights)
-    pipe.unet = unet
+    
     try:
         pipe.enable_xformers_memory_efficient_attention()
     except ImportError:
@@ -267,7 +286,7 @@ if "__main__" == __name__:
 
                 depth_pred: np.ndarray = pipe_out.depth_np
 
-                ensemble_preds.append(depth_pred.expand_dims(axis=0))  # [1, H, W]
+                ensemble_preds.append(np.expand_dims(depth_pred, axis=0))  # [1, H, W]
 
             ensemble_preds = np.concatenate(ensemble_preds, axis=0)  # [N, H, W]
 
