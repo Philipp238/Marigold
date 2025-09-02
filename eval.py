@@ -221,7 +221,16 @@ if "__main__" == __name__:
 
         # Evaluate (using CUDA if available)
         sample_metric = []
-        depth_pred_ts = torch.from_numpy(depth_pred).to(device)
+        depth_preds_ts = torch.from_numpy(depth_pred).to(device)
+        
+        for met_func in uq_metric_funcs:
+            _metric_name = met_func.__name__
+            _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
+            sample_metric.append(_metric.__str__())
+            metric_tracker.update(_metric_name, _metric)
+            
+        # Calculate mean
+        depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
 
         for met_func in metric_funcs:
             _metric_name = met_func.__name__
