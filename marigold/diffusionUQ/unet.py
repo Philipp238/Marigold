@@ -244,8 +244,8 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         )
         self.softplus = nn.Softplus()
 
-    def forward(self, x_t, t, encoder_hidden_state, **kwargs):
-        x_t = self.backbone(x_t, t, encoder_hidden_state).sample
+    def forward(self, x_t, t, encoder_hidden_states, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_states).sample
 
         mu = self.mu_projection(x_t).unsqueeze(-1)
         sigma = self.sigma_projection(x_t)
