@@ -2,11 +2,10 @@
 set -e
 set -x
 
-subfolder=${1:-"eval"}
 
 python eval.py \
-    --base_data_dir $BASE_DATA_DIR \
+    --base_data_dir /scratch/scholl/diffusion/marigold_data/ \
     --dataset_config config/dataset/data_nyu_test.yaml \
     --alignment least_square \
-    --prediction_dir output/${subfolder}/nyu_test/prediction \
-    --output_dir output/${subfolder}/nyu_test/eval_metric \
+    --prediction_dir /scratch/scholl/diffusion/output/eval/nyu_test/prediction \
+    --output_dir output/eval/nyu_test/eval_metric

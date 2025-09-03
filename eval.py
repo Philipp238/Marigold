@@ -36,6 +36,8 @@ from src.dataset import (
     get_pred_name,
 )
 from src.util import metric
+from marigold.diffusionUQ import losses
+
 from src.util.alignment import (
     align_depth_least_square,
     depth2disparity,
@@ -54,6 +56,13 @@ eval_metrics = [
     "delta3_acc",
     "i_rmse",
     "silog_rmse",
+]
+
+uq_eval_metrics = [
+      "energy_score_mask",
+      "gaussiannll_mask",
+      "coverage_mask",
+      "crps_mask",
 ]
 
 if "__main__" == __name__:
@@ -131,8 +140,9 @@ if "__main__" == __name__:
 
     # -------------------- Eval metrics --------------------
     metric_funcs = [getattr(metric, _met) for _met in eval_metrics]
+    uq_metric_funcs = [getattr(losses, _met) for _met in uq_eval_metrics]
 
-    metric_tracker = MetricTracker(*[m.__name__ for m in metric_funcs])
+    metric_tracker = MetricTracker(*[m.__name__ for m in (metric_funcs + uq_metric_funcs)])
     metric_tracker.reset()
 
     # -------------------- Per-sample metric file head --------------------
@@ -163,7 +173,7 @@ if "__main__" == __name__:
         )
         pred_name = os.path.join(os.path.dirname(rgb_name), pred_basename)
         pred_path = os.path.join(prediction_dir, pred_name)
-        depth_pred = np.load(pred_path)
+        depth_pred = np.load(pred_path)  # (N, H, W)
 
         if not os.path.exists(pred_path):
             logging.warn(f"Can't find prediction: {pred_path}")
@@ -171,13 +181,14 @@ if "__main__" == __name__:
 
         # Align with GT using least square
         if "least_square" == alignment:
-            depth_pred, scale, shift = align_depth_least_square(
-                gt_arr=depth_raw,
-                pred_arr=depth_pred,
-                valid_mask_arr=valid_mask,
-                return_scale_shift=True,
-                max_resolution=alignment_max_res,
-            )
+            for i in range(depth_pred.shape[0]):
+                depth_pred[i], scale, shift = align_depth_least_square(
+                    gt_arr=depth_raw,
+                    pred_arr=depth_pred[i],
+                    valid_mask_arr=valid_mask,
+                    return_scale_shift=True,
+                    max_resolution=alignment_max_res,
+                )
         elif "least_square_disparity" == alignment:
             # convert GT depth -> GT disparity
             gt_disparity, gt_non_neg_mask = depth2disparity(
@@ -210,7 +221,16 @@ if "__main__" == __name__:
 
         # Evaluate (using CUDA if available)
         sample_metric = []
-        depth_pred_ts = torch.from_numpy(depth_pred).to(device)
+        depth_preds_ts = torch.from_numpy(depth_pred).to(device)
+        
+        for met_func in uq_metric_funcs:
+            _metric_name = met_func.__name__
+            _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
+            sample_metric.append(_metric.__str__())
+            metric_tracker.update(_metric_name, _metric)
+            
+        # Calculate mean
+        depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
 
         for met_func in metric_funcs:
             _metric_name = met_func.__name__
