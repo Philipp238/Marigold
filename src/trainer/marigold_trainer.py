@@ -128,9 +128,6 @@ class MarigoldTrainer:
             warmup_steps=self.cfg.lr_scheduler.kwargs.warmup_steps,
         )
         self.lr_scheduler = LambdaLR(optimizer=self.optimizer, lr_lambda=lr_func)
-
-        # Loss (TODO)
-        
         
         self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
 

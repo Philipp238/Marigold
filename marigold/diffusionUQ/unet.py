@@ -228,6 +228,9 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             # self.num_tril_params = self.tril_indices.shape[1]
             # sigma_out_channels = (self.domain_dim)//2 +1
 
+        _weight = conv_out.weight.clone()  # [out_channels, in_channels, k, k]
+        _bias = conv_out.bias.clone()
+
         self.mu_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels,
@@ -235,6 +238,10 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             stride=conv_out.stride,
             padding=conv_out.padding,
         )
+        
+        self.mu_projection.weight = Parameter(_weight)
+        self.mu_projection.bias = Parameter(_bias)
+        
         self.sigma_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=sigma_out_channels,
@@ -277,56 +284,6 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         return UNetMvNormalOutput(output)
 
 
-class UNet_diffusion_sample(nn.Module):
-    def __init__(self, backbone, conv_out, n_samples=50):
-        super(UNet_diffusion_sample, self).__init__()
-        self.backbone = backbone  # The UNet without the final conv_out layer
-        self.in_channels = conv_out.in_channels
-        self.out_channels = conv_out.out_channels
-
-        self.n_samples = n_samples
-
-    def _expand(self, x, n_samples):
-        if len(x.shape) > 1:
-            return torch.repeat_interleave(
-                x.unsqueeze(1), n_samples, dim=1
-            ).reshape(x.shape[0] * n_samples, *x.shape[1:])
-        else:
-            return torch.repeat_interleave(
-                x.unsqueeze(1), n_samples, dim=1
-            ).reshape(x.shape[0] * n_samples)
-        
-
-    def forward(self, x_t, t, encoder_hidden_state, n_samples=None, **kwargs):
-        if n_samples is None:
-            n_samples = self.n_samples
-
-        x_t_expanded = self._expand(x_t_expanded, n_samples)
-        t_expanded = self._expand(t_expanded, n_samples)
-        condition_input_expanded = self._expand(condition_input_expanded, n_samples)
-        # x_t_expanded = torch.repeat_interleave(
-        #     x_t.unsqueeze(1), n_samples, dim=1
-        # ).reshape(x_t.shape[0] * n_samples, *x_t.shape[1:])
-        # t_expanded = torch.repeat_interleave(
-        #     t.unsqueeze(-1), n_samples, dim=-1
-        # ).reshape(t.shape[0] * n_samples)
-        # condition_input_expanded = torch.repeat_interleave(
-        #     condition_input.unsqueeze(1), n_samples, dim=1
-        # ).reshape(condition_input.shape[0] * n_samples, *condition_input.shape[1:])
-
-        # Concatenate noise
-        noise = torch.randn_like(x_t_expanded)
-        x_t_expanded = torch.cat([x_t_expanded, noise], dim=1).to(x_t.device)
-
-        output = self.backbone.forward(
-            x_t_expanded,
-            t_expanded,
-            encoder_hidden_state,
-        ).sample
-        output = output.reshape(x_t.shape[0], n_samples, *output.shape[1:])
-        return torch.moveaxis(output, 1, -1)  # Move sample dimension to last position
-
-
 class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     def __init__(self, backbone, conv_out, n_components=3):
         super(UNet_diffusion_mixednormal, self).__init__()
@@ -336,11 +293,22 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         self.n_components = n_components
 
+        # Prepare new weights and bias
+        _weight = conv_out.weight.clone()  # [out_channels, in_channels, k, k]
+        _bias = conv_out.bias.clone()
+
         self.mu_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels * n_components,
             kernel=1,
         )
+
+        # Repeat weights and bias for each mixture component        
+        # self.mu_projection.weight = Parameter(_weight.repeat(1, n_components, 1, 1))
+        # self.mu_projection.bias = Parameter(_bias.repeat(n_components))     
+        
+        
+        
         self.sigma_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels * n_components,
@@ -355,6 +323,26 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         self.softplus = nn.Softplus()
     
+    
+    
+    def _initialize_weights(self, weight, bias):
+        # Initialize weights and bias for mixture components with small perturbations; mean of weights should be the original weight
+        weight = weight.repeat(1, self.n_components, 1, 1)
+        bias = bias.repeat(self.n_components)
+        
+        k = 1 / torch.sqrt()
+        
+        for i in range(self.n_components):
+            epsilon_weight = 1e-2 * torch.randn_like(weight)
+            weight[i * self.out_channels : ((i + 1) % self.n_components) * self.out_channels] += epsilon_weight
+            weight[((i+1) % self.n_components) * self.out_channels : ((i + 2) % self.n_components) * self.out_channels] -= epsilon_weight
+            
+            epsilon_bias = 1e-2 * torch.randn_like(bias)
+            bias[i * self.out_channels : ((i + 1) % self.n_components) * self.out_channels] += epsilon_bias
+            bias[((i+1) % self.n_components) * self.out_channels : ((i + 2) % self.n_components) * self.out_channels] -= epsilon_bias
+            
+            
+
     def _reshape_util(self, x):
         x = x.reshape(
             x.shape[0], self.out_channels, self.n_components, *x.shape[2:]
