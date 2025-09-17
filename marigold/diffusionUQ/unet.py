@@ -55,7 +55,7 @@ class UNetMvNormalOutput(UNet2DConditionOutput):
         return noise_pred
 
 @dataclass
-class UNetMvMixedNormalOutput(UNet2DConditionOutput):
+class UNetMixedNormalOutput(UNet2DConditionOutput):
     def sample_noise_pred(self) -> torch.Tensor:
         mu = self.sample[..., 0]
         sigma = self.sample[..., 1]
@@ -70,7 +70,7 @@ class UNetMvMixedNormalOutput(UNet2DConditionOutput):
         ).squeeze(-1)
 
         predicted_noise = predicted_noise_mu + predicted_noise_sigma * torch.randn_like(
-            predicted_noise_mu, device=self.device
+            predicted_noise_mu, device=predicted_noise_sigma.device
         )
         predicted_noise = predicted_noise.squeeze(-1)
 
@@ -339,18 +339,23 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
         self.mu_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels * n_components,
-            kernel=1,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding,
         )
         self.sigma_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels * n_components,
-            kernel=1,
-            init_bias=1,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding,
         )
         self.weights_projection = Conv2d(
             in_channels=self.in_channels,
             out_channels=self.out_channels * n_components,
-            kernel=1,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding,
         )
 
         self.softplus = nn.Softplus()
@@ -362,8 +367,8 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         return x
 
-    def forward(self, x_t, t, encoder_hidden_state, **kwargs):
-        x_t = self.backbone.forward_body(x_t, t, encoder_hidden_state)
+    def forward(self, x_t, t, encoder_hidden_states, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_states).sample
 
         mu = self.mu_projection(x_t)
         sigma = self.sigma_projection(x_t)
@@ -375,10 +380,12 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         # Apply postprocessing
         sigma = self.softplus(torch.clamp(sigma, min=-15)) + EPS
+        weights = torch.amax(weights, dim = (-2, -3), keepdims = True).repeat(1,1,mu.shape[-3],mu.shape[-2],1)
+
         weights = torch.softmax(torch.clamp(weights, min=-15, max=15), dim=-1)
 
         output = torch.stack([mu, sigma, weights], dim=-1)
-        return output
+        return UNetMixedNormalOutput(output)
 
 
 if __name__ == "__main__":
