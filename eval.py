@@ -45,6 +45,8 @@ from src.util.alignment import (
 )
 from src.util.metric import MetricTracker
 
+from marigold.util.ensemble import ensemble_align
+
 eval_metrics = [
     "abs_relative_difference",
     "squared_relative_difference",
@@ -104,6 +106,25 @@ if "__main__" == __name__:
         type=int,
         default=None,
         help="Max operating resolution used for LS alignment",
+    )
+
+    parser.add_argument(
+        "--aggregation",
+        choices=["mean", "median"],
+        default="mean",
+        help="Method to aggregate depth predictions.",
+    )
+    
+    parser.add_argument(
+        "--ensemble_alignment",
+        action="store_true",
+        help="Whether to align each sample in the ensemble based on the other samples.",
+    )
+
+    parser.add_argument(
+        "--ensemble_alignment_aggregation",
+        action="store_true",
+        help="Whether to align each sample in the ensemble based on the other samples (only used in the aggregation).",
     )
 
     parser.add_argument("--no_cuda", action="store_true", help="Run without cuda")
@@ -179,58 +200,111 @@ if "__main__" == __name__:
             logging.warn(f"Can't find prediction: {pred_path}")
             continue
 
-        # Align with GT using least square
-        if "least_square" == alignment:
-            for i in range(depth_pred.shape[0]):
-                depth_pred[i], scale, shift = align_depth_least_square(
+        if args.ensemble_alignment or args.ensemble_alignment_aggregation:
+            depth_preds_ensemble_aligned = ensemble_align(depth_pred)
+        
+        if not args.ensemble_alignment:
+            # Align with GT using least square
+            if "least_square" == alignment:
+                for i in range(depth_pred.shape[0]):
+                    depth_pred[i], scale, shift = align_depth_least_square(
+                        gt_arr=depth_raw,
+                        pred_arr=depth_pred[i],
+                        valid_mask_arr=valid_mask,
+                        return_scale_shift=True,
+                        max_resolution=alignment_max_res,
+                    )
+        else:
+            # Clip to dataset min max
+            depth_preds_ensemble_aligned = np.clip(
+                depth_preds_ensemble_aligned, a_min=dataset.min_depth, a_max=dataset.max_depth
+            )
+
+            # clip to d > 0 for evaluation
+            depth_preds_ensemble_aligned = np.clip(depth_preds_ensemble_aligned, a_min=1e-6, a_max=None)
+
+            # Evaluate (using CUDA if available)
+            # depth_pred_ensemble_aligned_ts = torch.from_numpy(depth_pred_ensemble_aligned).to(device)
+            
+            # Aggregate
+            if "mean" == args.aggregation:
+                depth_pred = depth_preds_ensemble_aligned.mean(axis=0)[0]
+            elif "median" == args.aggregation:
+                depth_pred = np.median(depth_preds_ensemble_aligned, axis=0)[0]
+                
+            # Align with GT using least square
+            if "least_square" == alignment:
+                depth_pred, scale, shift = align_depth_least_square(
                     gt_arr=depth_raw,
-                    pred_arr=depth_pred[i],
+                    pred_arr=depth_pred,
                     valid_mask_arr=valid_mask,
                     return_scale_shift=True,
                     max_resolution=alignment_max_res,
                 )
-        elif "least_square_disparity" == alignment:
-            # convert GT depth -> GT disparity
-            gt_disparity, gt_non_neg_mask = depth2disparity(
-                depth=depth_raw, return_mask=True
-            )
-            # LS alignment in disparity space
-            pred_non_neg_mask = depth_pred > 0
-            valid_nonnegative_mask = valid_mask & gt_non_neg_mask & pred_non_neg_mask
+                
+            # Now shift each depth_pred_ensemble_aligned sample with the same scale and shift
+            for i in range(depth_preds_ensemble_aligned.shape[0]):
+                depth_preds_ensemble_aligned[i] = depth_preds_ensemble_aligned[i] * scale + shift
 
-            disparity_pred, scale, shift = align_depth_least_square(
-                gt_arr=gt_disparity,
-                pred_arr=depth_pred,
-                valid_mask_arr=valid_nonnegative_mask,
-                return_scale_shift=True,
-                max_resolution=alignment_max_res,
-            )
-            # convert to depth
-            disparity_pred = np.clip(
-                disparity_pred, a_min=1e-3, a_max=None
-            )  # avoid 0 disparity
-            depth_pred = disparity2depth(disparity_pred)
+            depth_preds = depth_preds_ensemble_aligned.squeeze(1) # (N, H, W)
+            
+            depth_pred_ts = torch.from_numpy(depth_preds).to(device)
 
         # Clip to dataset min max
-        depth_pred = np.clip(
-            depth_pred, a_min=dataset.min_depth, a_max=dataset.max_depth
+        depth_preds = np.clip(
+            depth_preds, a_min=dataset.min_depth, a_max=dataset.max_depth
         )
 
         # clip to d > 0 for evaluation
-        depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+        depth_preds = np.clip(depth_preds, a_min=1e-6, a_max=None)
 
         # Evaluate (using CUDA if available)
+        depth_preds_ts = torch.from_numpy(depth_preds).to(device)
+
         sample_metric = []
-        depth_preds_ts = torch.from_numpy(depth_pred).to(device)
         
         for met_func in uq_metric_funcs:
             _metric_name = met_func.__name__
             _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
             sample_metric.append(_metric.__str__())
             metric_tracker.update(_metric_name, _metric)
+
+        if args.ensemble_alignment_aggregation:
+            # Clip to dataset min max
+            depth_preds_ensemble_aligned = np.clip(
+                depth_preds_ensemble_aligned, a_min=dataset.min_depth, a_max=dataset.max_depth
+            )
+
+            # clip to d > 0 for evaluation
+            depth_preds_ensemble_aligned = np.clip(depth_preds_ensemble_aligned, a_min=1e-6, a_max=None)
+
+            # Evaluate (using CUDA if available)
+            depth_pred_ensemble_aligned_ts = torch.from_numpy(depth_preds_ensemble_aligned).to(device)
             
-        # Calculate mean
-        depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
+            # Aggregate
+            if "mean" == args.aggregation:
+                depth_pred_ts = depth_pred_ensemble_aligned_ts.mean(dim=0, keepdim=False)[0]
+            elif "median" == args.aggregation:
+                depth_pred_ts = depth_pred_ensemble_aligned_ts.median(dim=0, keepdim=False).values[0]
+                
+            # Align with GT using least square
+            if "least_square" == alignment:
+                depth_pred_ts, scale, shift = align_depth_least_square(
+                    gt_arr=depth_raw,
+                    pred_arr=depth_pred_ts.cpu().numpy(),
+                    valid_mask_arr=valid_mask,
+                    return_scale_shift=True,
+                    max_resolution=alignment_max_res,
+                )
+            
+            # To device
+            depth_pred_ts = torch.from_numpy(depth_pred_ts).to(device)
+        else:
+            # Aggregate
+            if "mean" == args.aggregation:
+                depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
+            elif "median" == args.aggregation:
+                depth_pred_ts = depth_preds_ts.median(dim=0, keepdim=False).values
 
         for met_func in metric_funcs:
             _metric_name = met_func.__name__

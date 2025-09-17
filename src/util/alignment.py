@@ -11,6 +11,8 @@ def align_depth_least_square(
     valid_mask_arr: np.ndarray,
     return_scale_shift=True,
     max_resolution=None,
+    scale=None,
+    shift=None,
 ):
     ori_shape = pred_arr.shape  # input shape
 

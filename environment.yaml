@@ -1,4 +1,4 @@
-name: marigold
+name: marigoldOldCUDA
 channels:
   - conda-forge
   - nvidia
