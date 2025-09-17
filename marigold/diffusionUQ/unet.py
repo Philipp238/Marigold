@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -285,8 +286,13 @@ class UNet_diffusion_mvnormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
 
 class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin):
-    def __init__(self, backbone, conv_out, n_components=3):
+    def __init__(self, backbone, conv_out, n_components=3, weights_init="replicate"):
         super(UNet_diffusion_mixednormal, self).__init__()
+        
+        assert weights_init in ["replicate", "random_perturbation"], "weights_init should be either 'replicate' or 'random_perturbation'"
+
+        self.weights_init = weights_init
+
         self.backbone = backbone  # The UNet without the final conv_out layer
         self.in_channels = conv_out.in_channels
         self.out_channels = conv_out.out_channels
@@ -296,6 +302,7 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
         # Prepare new weights and bias
         _weight = conv_out.weight.clone()  # [out_channels, in_channels, k, k]
         _bias = conv_out.bias.clone()
+        self.kernel_size = conv_out.kernel_size
 
         self.mu_projection = Conv2d(
             in_channels=self.in_channels,
@@ -309,6 +316,7 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
         # self.mu_projection.weight = Parameter(_weight.repeat(1, n_components, 1, 1))
         # self.mu_projection.bias = Parameter(_bias.repeat(n_components))     
         
+        self._initialize_weights(_weight, _bias)
         
         
         self.sigma_projection = Conv2d(
@@ -328,25 +336,36 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
 
         self.softplus = nn.Softplus()
     
+    def _modulo_with_end(self, a, b):
+        if a==b:
+            return a
+        else:
+            return a % b
     
     
-    def _initialize_weights(self, weight, bias):
+    def _initialize_weights(self, _weight, _bias):
         # Initialize weights and bias for mixture components with small perturbations; mean of weights should be the original weight
-        weight = weight.repeat(1, self.n_components, 1, 1)
-        bias = bias.repeat(self.n_components)
+        weight = _weight.repeat(self.n_components, 1, 1, 1)
+        bias = _bias.repeat(self.n_components)
         
-        k = 1 / torch.sqrt()
+        if self.weights_init == "random_perturbation":
+            k = 1 / math.sqrt(self.kernel_size[0] * self.kernel_size[1] * self.in_channels)
+
+            for i in range(self.n_components):
+                epsilon_weight = k * (torch.rand_like(_weight) - 0.5) * 2
+                weight[i * self.out_channels : self._modulo_with_end(i + 1, self.n_components) * self.out_channels] += epsilon_weight
+                weight[((i+1) % self.n_components) * self.out_channels : self._modulo_with_end(i + 2, self.n_components) * self.out_channels] -= epsilon_weight
+
+                epsilon_bias = k * (torch.rand_like(_bias) - 0.5) * 2
+                bias[i * self.out_channels : self._modulo_with_end(i + 1, self.n_components) * self.out_channels] += epsilon_bias
+                bias[((i+1) % self.n_components) * self.out_channels : self._modulo_with_end(i + 2, self.n_components) * self.out_channels] -= epsilon_bias
+        elif self.weights_init == "replicate":
+            pass
         
-        for i in range(self.n_components):
-            epsilon_weight = 1e-2 * torch.randn_like(weight)
-            weight[i * self.out_channels : ((i + 1) % self.n_components) * self.out_channels] += epsilon_weight
-            weight[((i+1) % self.n_components) * self.out_channels : ((i + 2) % self.n_components) * self.out_channels] -= epsilon_weight
-            
-            epsilon_bias = 1e-2 * torch.randn_like(bias)
-            bias[i * self.out_channels : ((i + 1) % self.n_components) * self.out_channels] += epsilon_bias
-            bias[((i+1) % self.n_components) * self.out_channels : ((i + 2) % self.n_components) * self.out_channels] -= epsilon_bias
-            
-            
+        self.mu_projection.weight = Parameter(weight)
+        self.mu_projection.bias = Parameter(bias)
+        
+        return 
 
     def _reshape_util(self, x):
         x = x.reshape(

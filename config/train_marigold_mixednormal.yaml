@@ -66,6 +66,7 @@ loss:
     reduction: mean
     distributional_method: mixednormal # deterministic, normal, mvnormal, mixednormal
     mvnormal_method: lora
+    weights_init: random_perturbation  # replicate, random_perturbation
     n_components: 25
     uncertainty_quantification: diffusion
     gamma: 75

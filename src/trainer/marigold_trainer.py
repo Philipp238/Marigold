@@ -109,6 +109,7 @@ class MarigoldTrainer:
                 backbone=self.model.unet,
                 conv_out=conv_out,
                 n_components=self.cfg.loss.kwargs.n_components,
+                weights_init=self.cfg.loss.kwargs.weights_init
             )
             self.model.unet = unet_diffusion
         
