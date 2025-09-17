@@ -199,6 +199,49 @@ class QICE(nn.Module):
         qice = torch.abs(torch.ones(self.n_bins) / self.n_bins - quantile_ratio).mean()
         return qice.item()
 
+class NormalCRPS(nn.Module):
+    """Computes the continuous ranked probability score (CRPS) for a predictive normal distribution and corresponding observations.
+
+    Args:
+        observation (Tensor): Observed outcome. Shape = [batch_size, d0, .. dn].
+        mu (Tensor): Predicted mu of normal distribution. Shape = [batch_size, d0, .. dn].
+        sigma (Tensor): Predicted sigma of normal distribution. Shape = [batch_size, d0, .. dn].
+        reduce (bool, optional): Boolean value indicating whether reducing the loss to one value or to
+            a Tensor with shape = `[batch_size]`.
+        reduction (str, optional): Specifies the reduction to apply to the output:
+            ``'mean'`` | ``'sum'``.
+    Raises:
+        ValueError: If sizes of target mu and sigma don't match.
+
+    Returns:
+        quantile_score: 1-D float `Tensor` with shape [batch_size] or Float if reduction = True
+
+    References:
+      - Gneiting, T. et al., 2005: Calibrated Probabilistic Forecasting Using Ensemble Model Output Statistics and Minimum CRPS Estimation. Mon. Wea. Rev., 133, 1098–1118
+    """
+
+    def __init__(
+        self,
+        reduction="mean",
+    ) -> None:
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, observation: Tensor, mu: Tensor, sigma: Tensor) -> Tensor:
+        if not (mu.size() == sigma.size() == observation.size()):
+            raise ValueError("Mismatching target and prediction shapes")
+        # Use absolute value of sigma
+        sigma = torch.abs(sigma) + EPS
+        loc = (observation - mu) / sigma
+        Phi = 0.5 * (1 + torch.special.erf(loc / np.sqrt(2.0)))
+        phi = 1 / (np.sqrt(2.0 * np.pi)) * torch.exp(-torch.pow(loc, 2) / 2.0)
+        crps = sigma * (loc * (2.0 * Phi - 1) + 2.0 * phi - 1 / np.sqrt(np.pi))
+        if self.reduction == "sum":
+            return torch.sum(crps)
+        elif self.reduction == "mean":
+            return torch.mean(crps)
+        else:
+            return crps
 
 class NormalMixtureCRPS(nn.Module):
     def __init__(
