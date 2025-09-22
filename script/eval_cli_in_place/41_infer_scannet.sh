@@ -18,3 +18,5 @@ python infer.py  \
     --eval_in_place True \
     --alignment least_square \
     --eval_output_dir output/$3/scannet/$9_$3_metric \
+    --evaluate_agg_and_ens_combinations ${10} \
+    --eval_default_setting ${11} \

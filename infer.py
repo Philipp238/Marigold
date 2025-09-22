@@ -31,7 +31,8 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
-from marigold.diffusionUQ.unet import UNet_diffusion_mvnormal, UNet_diffusion_normal
+from marigold.diffusionUQ.unet import UNet_diffusion_mixednormal, UNet_diffusion_mvnormal, UNet_diffusion_normal
+from marigold.util.ensemble import ensemble_align
 from src.util.seeding import seed_all
 from src.dataset import (
     BaseDepthDataset,
@@ -119,6 +120,45 @@ if "__main__" == __name__:
         help="Resampling method used to resize images. This can be one of 'bilinear' or 'nearest'.",
     )
 
+    # Eval in place configuration
+    parser.add_argument(
+        "--eval_in_place",
+        type=bool,
+        default=False,
+        help="Evaluate in place and delete the infered right away",
+    )
+    # LS depth alignment
+    parser.add_argument(
+        "--alignment",
+        choices=[None, "least_square", "least_square_disparity"],
+        default=None,
+        help="Method to estimate scale and shift between predictions and ground truth.",
+    )
+    parser.add_argument(
+        "--alignment_max_res",
+        type=int,
+        default=None,
+        help="Max operating resolution used for LS alignment",
+    )
+    parser.add_argument(
+        "--eval_output_dir", type=str, default="", help="Output directory for evaluation results."
+    )
+    
+    parser.add_argument(
+        "--evaluate_agg_and_ens_combinations",
+        choices=["True", "False"],
+        default="False",
+        help="Compute metrics for all combinations of test time aggregating and ensembling",
+    )
+
+    parser.add_argument(
+        "--eval_default_setting",
+        choices=["True", "False"],
+        default="False",
+        help="Only use the default setting in aggregation and ensembling to speed up computation",
+    )
+
+
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
 
     args = parser.parse_args()
@@ -128,6 +168,15 @@ if "__main__" == __name__:
     dataset_config = args.dataset_config
     base_data_dir = args.base_data_dir
     output_dir = args.output_dir
+
+    eval_in_place = args.eval_in_place
+    alignment = args.alignment
+    alignment_max_res = args.alignment_max_res
+    eval_output_dir = args.eval_output_dir
+    pred_suffix = ".npy"
+
+
+    assert not eval_in_place or (eval_output_dir != "")
 
     denoise_steps = args.denoise_steps
     ensemble_size = args.ensemble_size
@@ -142,6 +191,8 @@ if "__main__" == __name__:
             "Processing at native resolution without resizing output might NOT lead to exactly the same resolution, due to the padding and pooling properties of conv layers."
         )
     resample_method = args.resample_method
+    evaluate_agg_and_ens_combinations = args.evaluate_agg_and_ens_combinations
+    eval_default_setting = args.eval_default_setting
 
     seed = args.seed
 
@@ -181,9 +232,14 @@ if "__main__" == __name__:
                 print("Invalid input. Please enter 'y' (for Yes) or 'n' (for No).")
                 check_directory(directory)  # Recursive call to ask again
 
-    check_directory(output_dir)
-    os.makedirs(output_dir, exist_ok=True)
-    logging.info(f"output dir = {output_dir}")
+    if eval_in_place:
+        check_directory(eval_output_dir)
+        os.makedirs(eval_output_dir, exist_ok=True)
+        logging.info(f"eval output dir = {eval_output_dir}")
+    else:
+        check_directory(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+        logging.info(f"output dir = {output_dir}")
 
     # -------------------- Config --------------------
 
@@ -206,7 +262,12 @@ if "__main__" == __name__:
         cfg_data, base_data_dir=base_data_dir, mode=DatasetMode.RGB_ONLY
     )
 
+    gt_dataset: BaseDepthDataset = get_dataset(
+        cfg_data, base_data_dir=base_data_dir, mode=DatasetMode.EVAL
+    )
+
     dataloader = DataLoader(dataset, batch_size=1, num_workers=0)
+    gt_dataloader = DataLoader(gt_dataset, batch_size=1, num_workers=0)
 
     # -------------------- Model --------------------
     if half_precision:
@@ -220,6 +281,82 @@ if "__main__" == __name__:
         variant = None
 
 
+    # ---------------- Eval in Place ----------------
+    if eval_in_place:
+        from tabulate import tabulate
+        from src.util import metric
+        from marigold.diffusionUQ import losses
+
+        from src.util.alignment import (
+            align_depth_least_square,
+            depth2disparity,
+            disparity2depth,
+        )
+        from src.util.metric import MetricTracker
+
+        eval_metrics = [
+            "abs_relative_difference",
+            "squared_relative_difference",
+            "rmse_linear",
+            "rmse_log",
+            "log10",
+            "delta1_acc",
+            "delta2_acc",
+            "delta3_acc",
+            "i_rmse",
+            "silog_rmse",
+        ]
+
+        uq_eval_metrics = [
+            "energy_score_mask",
+            "gaussiannll_mask",
+            "coverage_mask",
+            "crps_mask",
+        ]
+
+        # -------------------- Eval metrics --------------------
+        metric_funcs = [getattr(metric, _met) for _met in eval_metrics]
+        uq_metric_funcs = [getattr(losses, _met) for _met in uq_eval_metrics]
+
+        if evaluate_agg_and_ens_combinations:
+            if eval_default_setting:
+                AGG_METHODS = ["median"]
+                ENS_ALIGN_METHODS = ["ens_align"]
+                ENS_ALIGN_AGG_METHODS = ["ens_align_agg"]
+            else:
+                AGG_METHODS = ["mean", "median"]
+                ENS_ALIGN_METHODS = ["Id", "ens_align"]
+                ENS_ALIGN_AGG_METHODS = ["Id", "ens_align_agg"]
+                
+            metric_tracker_dict = {}
+            per_sample_filename_dict = {}
+
+            for agg_method in AGG_METHODS:
+                for ens_align_method in ENS_ALIGN_METHODS:
+                    for ens_align_agg_method in ENS_ALIGN_AGG_METHODS:
+                        metric_tracker = MetricTracker(*[m.__name__ for m in (metric_funcs + uq_metric_funcs)])
+                        metric_tracker.reset()
+
+                        metric_tracker_dict[f"{agg_method}-{ens_align_method}-{ens_align_agg_method}"] = metric_tracker
+                        per_sample_filename_dict[f"{agg_method}-{ens_align_method}-{ens_align_agg_method}"] = os.path.join(eval_output_dir, f"{agg_method}-{ens_align_method}-{ens_align_agg_method}_per_sample_metrics.csv")
+
+                        with open(per_sample_filename_dict[f"{agg_method}-{ens_align_method}-{ens_align_agg_method}"], "w+") as f:
+                            f.write("filename,")
+                            f.write(",".join([m.__name__ for m in metric_funcs]))
+                            f.write("\n")
+        else:
+            metric_tracker = MetricTracker(*[m.__name__ for m in (metric_funcs + uq_metric_funcs)]) 
+            metric_tracker.reset()
+
+        # -------------------- Per-sample metric file head --------------------
+        per_sample_filename = os.path.join(eval_output_dir, "per_sample_metrics.csv")
+        # write title
+        with open(per_sample_filename, "w+") as f:
+            f.write("filename,")
+            f.write(",".join([m.__name__ for m in metric_funcs]))
+            f.write("\n")
+
+
     
     pipe = MarigoldPipeline.from_pretrained(
         marigold_path, variant=variant, torch_dtype=dtype
@@ -229,6 +366,7 @@ if "__main__" == __name__:
 
 
     distributional_method = cfg.loss.kwargs.distributional_method
+    pipe.distributional_method = distributional_method
     if distributional_method == 'deterministic':
         pipe.unet.load_state_dict(unet_weights_dict)
     else:
@@ -244,6 +382,12 @@ if "__main__" == __name__:
             unet_diffusion = UNet_diffusion_mvnormal(
                 backbone=pipe.unet,
                 conv_out=old_conv_out
+            )
+        elif distributional_method == 'mixednormal':
+            unet_diffusion = UNet_diffusion_mixednormal(
+                backbone=pipe.unet,
+                conv_out=old_conv_out,
+                n_components=cfg.loss.kwargs.n_components
             )
         unet_diffusion.load_state_dict(unet_weights_dict)
         pipe.unet = unet_diffusion
@@ -261,8 +405,9 @@ if "__main__" == __name__:
 
     # -------------------- Inference and saving --------------------
     with torch.no_grad():
-        for batch in tqdm(
-            dataloader, desc=f"Inferencing on {dataset.disp_name}", leave=True
+        for (batch, data) in tqdm(
+            zip(dataloader,gt_dataloader),
+            desc=f"Inferencing on {dataset.disp_name}", leave=True
         ):
             # Read input image
             rgb_int = batch["rgb_int"].squeeze().numpy().astype(np.uint8)  # [3, H, W]
@@ -290,6 +435,193 @@ if "__main__" == __name__:
 
             ensemble_preds = np.concatenate(ensemble_preds, axis=0)  # [N, H, W]
 
+            if eval_in_place:
+                # GT data
+                depth_raw_ts = data["depth_raw_linear"].squeeze()
+                valid_mask_ts = data["valid_mask_raw"].squeeze()
+                rgb_name = data["rgb_relative_path"][0]
+
+                depth_raw = depth_raw_ts.numpy()
+                valid_mask = valid_mask_ts.numpy()
+
+                depth_raw_ts = depth_raw_ts.to(device)
+                valid_mask_ts = valid_mask_ts.to(device)
+                rgb_basename = os.path.basename(rgb_name)
+                pred_basename = get_pred_name(
+                    rgb_basename, dataset.name_mode, suffix=pred_suffix
+                )
+                pred_name = os.path.join(os.path.dirname(rgb_name), pred_basename)
+
+                if evaluate_agg_and_ens_combinations:
+                    for iter_key in metric_tracker_dict.keys():
+                        agg_method, ens_align_method, ens_align_agg_method = iter_key.split("-")
+
+                        aggregation = agg_method
+                        ensemble_alignment = ens_align_method == "ens_align"
+                        ensemble_alignment_aggregation = ens_align_agg_method == "ens_align_agg"
+                        depth_preds = ensemble_preds
+                        
+
+                        if ensemble_alignment or ensemble_alignment_aggregation:
+                            depth_preds_ensemble_aligned = ensemble_align(depth_preds)
+                        
+                        if not ensemble_alignment:
+                            # Align with GT using least square
+                            if "least_square" == alignment:
+                                for i in range(depth_preds.shape[0]):
+                                    depth_preds[i], scale, shift = align_depth_least_square(
+                                        gt_arr=depth_raw,
+                                        pred_arr=depth_preds[i],
+                                        valid_mask_arr=valid_mask,
+                                        return_scale_shift=True,
+                                        max_resolution=alignment_max_res,
+                                    )
+                        else:
+                            # Aggregate
+                            if "mean" == aggregation:
+                                depth_pred = depth_preds_ensemble_aligned.mean(axis=0)[0]
+                            elif "median" == aggregation:
+                                depth_pred = np.median(depth_preds_ensemble_aligned, axis=0)[0]
+                                
+                            # Align with GT using least square
+                            if "least_square" == alignment:
+                                depth_pred, scale, shift = align_depth_least_square(
+                                    gt_arr=depth_raw,
+                                    pred_arr=depth_pred,
+                                    valid_mask_arr=valid_mask,
+                                    return_scale_shift=True,
+                                    max_resolution=alignment_max_res,
+                                )
+                                
+                            # Now shift each depth_pred_ensemble_aligned sample with the same scale and shift
+                            for i in range(depth_preds_ensemble_aligned.shape[0]):
+                                depth_preds_ensemble_aligned[i] = depth_preds_ensemble_aligned[i] * scale + shift
+
+                            depth_preds = depth_preds_ensemble_aligned.squeeze(1) # (N, H, W)
+                            
+                            depth_pred_ts = torch.from_numpy(depth_preds).to(device)
+
+                        # Clip to dataset min max
+                        depth_preds = np.clip(
+                            depth_preds, a_min=dataset.min_depth, a_max=dataset.max_depth
+                        )
+                        # clip to d > 0 for evaluation
+                        depth_preds = np.clip(depth_preds, a_min=1e-6, a_max=None)
+                        # Evaluate (using CUDA if available)
+                        depth_preds_ts = torch.from_numpy(depth_preds).to(device)
+
+                        sample_metric = []
+                        
+                        for met_func in uq_metric_funcs:
+                            _metric_name = met_func.__name__
+                            _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
+                            sample_metric.append(_metric.__str__())
+                            metric_tracker_dict[iter_key].update(_metric_name, _metric)
+
+                        if ensemble_alignment_aggregation:
+                            # Evaluate (using CUDA if available)
+                            depth_pred_ensemble_aligned_ts = torch.from_numpy(depth_preds_ensemble_aligned).to(device)
+                            
+                            # Aggregate
+                            if "mean" == aggregation:
+                                depth_pred_ts = depth_pred_ensemble_aligned_ts.mean(dim=0, keepdim=False)[0]
+                            elif "median" == aggregation:
+                                depth_pred_ts = depth_pred_ensemble_aligned_ts.median(dim=0, keepdim=False).values[0]
+                                
+                            # Align with GT using least square
+                            if "least_square" == alignment:
+                                depth_pred_ts, scale, shift = align_depth_least_square(
+                                    gt_arr=depth_raw,
+                                    pred_arr=depth_pred_ts.cpu().numpy(),
+                                    valid_mask_arr=valid_mask,
+                                    return_scale_shift=True,
+                                    max_resolution=alignment_max_res,
+                                )
+
+                            
+                            # Clip to dataset min max
+                            depth_pred_ts = np.clip(
+                                depth_pred_ts, a_min=dataset.min_depth, a_max=dataset.max_depth
+                            )
+                            # clip to d > 0 for evaluation
+                            depth_pred_ts = np.clip(depth_pred_ts, a_min=1e-6, a_max=None)
+                            # To device
+                            depth_pred_ts = torch.from_numpy(depth_pred_ts).to(device)
+                        else:
+                            # Aggregate
+                            if "mean" == aggregation:
+                                depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
+                            elif "median" == aggregation:
+                                depth_pred_ts = depth_preds_ts.median(dim=0, keepdim=False).values
+
+                        for met_func in metric_funcs:
+                            _metric_name = met_func.__name__
+                            _metric = met_func(depth_pred_ts, depth_raw_ts, valid_mask_ts).item()
+                            sample_metric.append(_metric.__str__())
+                            metric_tracker_dict[iter_key].update(_metric_name, _metric)
+
+                        # Save per-sample metric
+                        with open(per_sample_filename_dict[iter_key], "a+") as f:
+                            f.write(pred_name + ",")
+                            f.write(",".join(sample_metric))
+                            f.write("\n")
+
+                else:
+
+                    # Align with GT using least square
+                    if "least_square" == alignment:
+                        for i in range(ensemble_preds.shape[0]):
+                            ensemble_preds[i], scale, shift = align_depth_least_square(
+                                gt_arr=depth_raw,
+                                pred_arr=ensemble_preds[i],
+                                valid_mask_arr=valid_mask,
+                                return_scale_shift=True,
+                                max_resolution=alignment_max_res,
+                            )
+                    elif "least_square_disparity" == alignment:
+                        raise NotImplementedError("least_square_disparity method is currently not implemented")       
+
+                    # Clip to dataset min max
+                    depth_pred = np.clip(
+                        ensemble_preds, a_min=gt_dataset.min_depth, a_max=gt_dataset.max_depth
+                    )
+
+                    # clip to d > 0 for evaluation
+                    depth_pred = np.clip(depth_pred, a_min=1e-6, a_max=None)
+
+                    # Evaluate (using CUDA if available)
+                    sample_metric = []
+                    if ensemble_preds.shape[0] > 10:
+                        depth_preds_ts = torch.from_numpy(depth_pred).to("cpu")
+                        depth_raw_ts = depth_raw_ts.to("cpu")
+                        valid_mask_ts = valid_mask_ts.to("cpu")
+                    else:
+                        depth_preds_ts = torch.from_numpy(depth_pred).to(device)
+                    
+                    for met_func in uq_metric_funcs:
+                        _metric_name = met_func.__name__
+                        _metric = met_func(depth_preds_ts, depth_raw_ts, valid_mask_ts).item()
+                        sample_metric.append(_metric.__str__())
+                        metric_tracker.update(_metric_name, _metric)
+                        
+                    # Calculate mean
+                    depth_pred_ts = depth_preds_ts.mean(dim=0, keepdim=False)
+
+                    for met_func in metric_funcs:
+                        _metric_name = met_func.__name__
+                        _metric = met_func(depth_pred_ts, depth_raw_ts, valid_mask_ts).item()
+                        sample_metric.append(_metric.__str__())
+                        metric_tracker.update(_metric_name, _metric)
+
+                    # Save per-sample metric
+                    with open(per_sample_filename, "a+") as f:
+                        f.write(pred_name + ",")
+                        f.write(",".join(sample_metric))
+                        f.write("\n")
+
+                continue
+
+
             # Save predictions
             rgb_filename = batch["rgb_relative_path"][0]
             rgb_basename = os.path.basename(rgb_filename)
@@ -304,3 +636,45 @@ if "__main__" == __name__:
                 logging.warning(f"Existing file: '{save_to}' will be overwritten")
 
             np.save(save_to, ensemble_preds)
+
+    # -------------------- Save metrics to file --------------------
+    if eval_in_place:
+        eval_text = f"Evaluation metrics:\n\
+        of in_place predictions\n\
+        on dataset: {gt_dataset.disp_name}\n\
+        with samples in: {gt_dataset.filename_ls_path}\n"
+
+        eval_text += f"min_depth = {gt_dataset.min_depth}\n"
+        eval_text += f"max_depth = {gt_dataset.max_depth}\n"
+
+        if evaluate_agg_and_ens_combinations:
+            for iter_key in metric_tracker_dict.keys():
+                agg_method, ens_align_method, ens_align_agg_method = iter_key.split("-")
+                curr_eval_text = eval_text + tabulate(
+                    [metric_tracker_dict[iter_key].result().keys(), metric_tracker_dict[iter_key].result().values()]
+                )
+
+                metrics_filename = "eval_metrics"
+                if alignment:
+                    metrics_filename += f"-{alignment}"
+                metrics_filename += ".txt"
+
+                _save_to = os.path.join(eval_output_dir, f"{agg_method}-{ens_align_method}-{ens_align_agg_method}_{metrics_filename}")
+                
+                with open(_save_to, "w+") as f:
+                    f.write(curr_eval_text)
+                    logging.info(f"Evaluation metrics saved to {_save_to}")
+        else:
+            eval_text += tabulate(
+                [metric_tracker.result().keys(), metric_tracker.result().values()]
+            )
+
+            metrics_filename = "eval_metrics"
+            if alignment:
+                metrics_filename += f"-{alignment}"
+            metrics_filename += ".txt"
+
+            _save_to = os.path.join(eval_output_dir, metrics_filename)
+            with open(_save_to, "w+") as f:
+                f.write(eval_text)
+                logging.info(f"Evaluation metrics saved to {_save_to}")

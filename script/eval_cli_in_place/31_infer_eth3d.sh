@@ -20,3 +20,5 @@ python infer.py  \
     --alignment least_square \
     --eval_output_dir output/$3/eth3d/$9_$3_metric \
     --alignment_max_res 1024 \
+    --evaluate_agg_and_ens_combinations ${10} \
+    --eval_default_setting ${11} \
