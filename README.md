@@ -1,3 +1,14 @@
+# Improved Probabilistic Regression using Diffusion Models (depth estimation experiments)
+
+This repository contains the code of the depth estimation experiments of the paper "Improved Probabilistic Regression using Diffusion Models".
+
+The repository is forked from the [Marigold repository](https://github.com/prs-eth/Marigold). For general instructions regarding installation, training, and inference, see the original README.md below.
+
+To use the newly proposed UQ methods, see the config files `train_marigold_normal.yaml`, `train_marigold_mvnormal.yaml`, and `train_marigold_mixednormal.yaml`. The only adaptations (apart from the additional metrics) are in the section "loss".
+
+The main part of our added code is contained in `marigold/diffusionUQ`.
+
+
 # Marigold: Repurposing Diffusion-Based Image Generators for Monocular Depth Estimation
 
 **CVPR 2024 (Oral, Best Paper Award Candidate)**
