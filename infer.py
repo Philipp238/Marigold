@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
-from marigold.diffusionUQ.unet import UNet_diffusion_mixednormal, UNet_diffusion_mvnormal, UNet_diffusion_normal
+from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_mvnormal, UNet_diffusion_normal
 from marigold.util.ensemble import ensemble_align
 from src.util.seeding import seed_all
 from src.dataset import (
@@ -346,6 +346,12 @@ if "__main__" == __name__:
                 backbone=pipe.unet,
                 conv_out=old_conv_out,
                 n_components=cfg.loss.kwargs.n_components
+            )
+        elif distributional_method == 'deterministic_multi_output_head':
+            unet_diffusion = UNet_diffusion_mean(
+                backbone=pipe.unet,
+                conv_out=old_conv_out,
+                num_out_heads=cfg.loss.kwargs.num_out_heads
             )
         unet_diffusion.load_state_dict(unet_weights_dict)
         pipe.unet = unet_diffusion

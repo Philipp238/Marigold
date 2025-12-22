@@ -395,6 +395,56 @@ class UNet_diffusion_mixednormal(ModelMixin, ConfigMixin, FromOriginalModelMixin
         return UNetMixedNormalOutput(output)
 
 
+class UNet_diffusion_mean(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+    def __init__(self, backbone, conv_out, num_out_heads = 2):
+        super(UNet_diffusion_mean, self).__init__()
+        # self.dtype = backbone.dtype
+        
+        self.backbone = backbone  # The UNet without the final conv_out layer
+        in_channels = conv_out.in_channels
+        out_channels = conv_out.out_channels
+        
+        # Prepare new weights and bias
+        _weight = conv_out.weight.clone()  # [out_channels, in_channels, k, k]
+        _bias = conv_out.bias.clone()
+
+        self.proj1 = Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding
+        )
+        
+        self.proj1.weight = Parameter(_weight)
+        self.proj1.bias = Parameter(_bias)
+        
+        self.projections = nn.ModuleList([
+            Conv2d(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=conv_out.kernel_size,
+                    stride=conv_out.stride,
+                    padding=conv_out.padding
+                )
+            for _ in range(num_out_heads-1)
+        ])
+        
+        self.num_out_heads = num_out_heads
+        
+    def forward(self, x_t, t, encoder_hidden_states, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_states).sample
+
+        output = self.proj1(x_t)
+        for proj in self.projections:
+            output += proj(x_t)
+
+        output = output / self.num_out_heads
+
+        return UNet2DConditionOutput(output)
+
+
+
 if __name__ == "__main__":
     input = torch.randn(8, 1, 128)
     condition = torch.randn(8, 3, 128)

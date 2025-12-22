@@ -436,7 +436,7 @@ class MarigoldPipeline(DiffusionPipeline):
             output = self.unet(
                         unet_input, t, encoder_hidden_states=batch_empty_text_embed
                     )
-            if self.distributional_method == 'deterministic':
+            if self.distributional_method == 'deterministic' or self.distributional_method == "deterministic_multi_output_head":
                 noise_pred = output.sample  # [B, 4, h, w]
             else:
                 noise_pred = output.sample_noise_pred()  # [B, 4, h, w]

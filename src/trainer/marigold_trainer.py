@@ -52,7 +52,7 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
-from marigold.diffusionUQ.unet import UNet_diffusion_mixednormal, UNet_diffusion_normal, UNet_diffusion_mvnormal
+from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_normal, UNet_diffusion_mvnormal
 
 class MarigoldTrainer:
     def __init__(
@@ -112,6 +112,15 @@ class MarigoldTrainer:
                 weights_init=self.cfg.loss.kwargs.weights_init
             )
             self.model.unet = unet_diffusion
+        elif distributional_method == 'deterministic_multi_output_head':
+            conv_out = self._remove_unet_conv_out()
+            unet_diffusion = UNet_diffusion_mean(
+                backbone=self.model.unet,
+                conv_out=conv_out,
+                num_out_heads=self.cfg.loss.kwargs.num_out_heads,
+            )
+            self.model.unet = unet_diffusion
+            
         
         # Encode empty text prompt
         self.model.encode_empty_text()
