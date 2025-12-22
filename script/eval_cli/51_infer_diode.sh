@@ -20,7 +20,7 @@ EVAL_IN_PLACE="${10}" # Evaluate in place
 if [[ $EVAL_IN_PLACE == "--eval_in_place" ]]; then
     eval_in_place_options="--eval_in_place "
     eval_in_place_options+="--alignment least_square "
-    eval_in_place_options+="--eval_output_dir output/$SUBFOLDER/nyu_test/${IDENTIFIER}_${SUBFOLDER}_metric "
+    eval_in_place_options+="--eval_output_dir output/$SUBFOLDER/diode/${IDENTIFIER}_${SUBFOLDER}_metric "
 fi
 
 # -------------------------------
@@ -37,4 +37,5 @@ python infer.py \
     --output_dir "$OUTPUT_DIR/$SUBFOLDER/diode/prediction_$IDENTIFIER" \
     --processing_res 640 \
     --resample_method bilinear \
-    --marigold_path "$MARIGOLD_PATH"
+    --marigold_path "$MARIGOLD_PATH" \
+    $eval_in_place_options

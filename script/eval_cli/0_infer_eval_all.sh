@@ -63,10 +63,10 @@ echo "  skip_jobs          = $skip_jobs"
 echo "  eval_in_place      = $eval_in_place"
 
 identifier="${ckpt_name}_iter-${iter}_T-${diffusion_timesteps}_N-${ensemble_size}"
-ckpt="/path/to/checkpoint/${ckpt_name}/checkpoint/iter_${iter}/unet/diffusion_pytorch_model.bin"
-mrgld_path="/path/to/marigold/marigold_depth-v1-0/"
+ckpt="/home/math/kneissl/Projects/Marigold/output/${ckpt_name}/checkpoint/iter_${iter}/unet/diffusion_pytorch_model.bin"
+mrgld_path="/home/groups/ai/scholl/diffusion/models/marigold_depth-v1-0/"
 subfolder="eval"
-data_dir="/path/to/datasets"
+data_dir="/scratch/scholl/diffusion/marigold_data/"
 
 # -------------------------------
 # Optional flags (only set if True)

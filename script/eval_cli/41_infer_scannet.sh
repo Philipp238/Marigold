@@ -20,7 +20,7 @@ EVAL_IN_PLACE="${10}" # Evaluate in place
 if [[ $EVAL_IN_PLACE == "--eval_in_place" ]]; then
     eval_in_place_options="--eval_in_place "
     eval_in_place_options+="--alignment least_square "
-    eval_in_place_options+="--eval_output_dir output/$SUBFOLDER/nyu_test/${IDENTIFIER}_${SUBFOLDER}_metric "
+    eval_in_place_options+="--eval_output_dir output/$SUBFOLDER/scannet/${IDENTIFIER}_${SUBFOLDER}_metric "
 fi
 
 # -------------------------------
@@ -35,4 +35,5 @@ python infer.py \
     --processing_res 0 \
     --dataset_config config/dataset/data_scannet_val.yaml \
     --output_dir "$OUTPUT_DIR/$SUBFOLDER/scannet/prediction_$IDENTIFIER" \
-    --marigold_path "$MARIGOLD_PATH"
+    --marigold_path "$MARIGOLD_PATH" \
+    $eval_in_place_options
