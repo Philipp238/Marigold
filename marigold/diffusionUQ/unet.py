@@ -443,6 +443,73 @@ class UNet_diffusion_mean(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         return UNet2DConditionOutput(output)
 
+class UNet_diffusion_iDDPM(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+    def __init__(self, backbone, conv_out, beta):
+        super(UNet_diffusion_iDDPM, self).__init__()
+        # self.dtype = backbone.dtype
+        
+        self.backbone = backbone  # The UNet without the final conv_out layer
+        in_channels = conv_out.in_channels
+        out_channels = conv_out.out_channels
+
+        self.beta = beta
+        self.alpha = 1.0 - self.beta
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        
+        # Prepare new weights and bias
+        _weight = conv_out.weight.clone()  # [out_channels, in_channels, k, k]
+        _bias = conv_out.bias.clone()
+
+        self.mu_projection = Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding
+        )
+        
+        self.mu_projection.weight = Parameter(_weight)
+        self.mu_projection.bias = Parameter(_bias)
+        
+        self.sigma_projection = Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=conv_out.kernel_size,
+            stride=conv_out.stride,
+            padding=conv_out.padding
+            )
+        self.softplus = nn.Softplus()
+
+
+    def forward(self, x_t, t, encoder_hidden_states, **kwargs):
+        x_t = self.backbone(x_t, t, encoder_hidden_states).sample
+        mu = self.mu_projection(x_t)
+
+        alpha = (self.alpha.to(mu.device))[t]
+        alpha_bar = (self.alpha_bar.to(mu.device))[t]
+        beta = (self.beta.to(mu.device))[t]
+
+        # Reshape
+        alpha = alpha.view(*alpha.shape, *(1,) * (mu.ndim - alpha.ndim)).expand(mu.shape)
+        alpha_bar = alpha_bar.view(
+            *alpha_bar.shape, *(1,) * (mu.ndim - alpha_bar.ndim)
+        ).expand(mu.shape)
+        beta = beta.view(*beta.shape, *(1,) * (mu.ndim - beta.ndim)).expand(mu.shape)
+
+        alpha_hat_t_minus_1 = (self.alpha_bar.to(mu.device))[t - 1]
+        alpha_hat_t_minus_1 = alpha_hat_t_minus_1.view(
+                    *alpha_hat_t_minus_1.shape,
+                    *(1,) * (mu.ndim - alpha_hat_t_minus_1.ndim),
+                ).expand(mu.shape)
+        beta_wiggle = (1 - alpha_hat_t_minus_1) / (1 - alpha_bar) * beta
+
+        
+        sigma_parametrization = self.sigma_projection(x_t)
+        log_sigma = sigma_parametrization * torch.log(beta) + (1-sigma_parametrization) * torch.log(beta_wiggle)  # iDDPM never computes the variance but instead the log_variance
+        sigma = torch.exp(log_sigma)  # we compute the actual variance such that it fits to our sampler
+        output = torch.stack([mu, sigma], dim=-1)
+        return UNetNormalOutput(output)
+
 
 
 if __name__ == "__main__":

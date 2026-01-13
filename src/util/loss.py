@@ -6,7 +6,7 @@ import torch
 from marigold.diffusionUQ.train_utils import get_criterion
 
 
-def get_loss(loss_name, **kwargs):
+def get_loss(loss_name, beta=None, **kwargs):
     if "silog_mse" == loss_name:
         criterion = SILogMSELoss(**kwargs)
     elif "silog_rmse" == loss_name:
@@ -22,7 +22,7 @@ def get_loss(loss_name, **kwargs):
         criterion = MeanAbsRelLoss()
     elif kwargs.get("distributional_method", "deterministic") != "deterministic":
         kwargs['loss'] = loss_name
-        criterion = get_criterion(kwargs)
+        criterion = get_criterion(kwargs, beta=beta)
     else:
         raise NotImplementedError
 

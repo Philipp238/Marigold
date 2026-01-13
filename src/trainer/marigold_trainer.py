@@ -52,7 +52,7 @@ from src.util.multi_res_noise import multi_res_noise_like
 from src.util.alignment import align_depth_least_square
 from src.util.seeding import generate_seed_sequence
 
-from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_normal, UNet_diffusion_mvnormal
+from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_normal, UNet_diffusion_iDDPM, UNet_diffusion_mvnormal
 
 class MarigoldTrainer:
     def __init__(
@@ -87,6 +87,15 @@ class MarigoldTrainer:
         if 8 != self.model.unet.config["in_channels"]:
             self._replace_unet_conv_in()
 
+        # Training noise scheduler
+        self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
+            os.path.join(
+                base_ckpt_dir,
+                cfg.trainer.training_noise_scheduler.pretrained_path,
+                "scheduler",
+            )
+        )
+
         # Adapt the last layer of the UNet to fit to the used distributional method
         distributional_method = self.cfg.loss.kwargs.distributional_method
         if distributional_method == 'normal':
@@ -94,6 +103,14 @@ class MarigoldTrainer:
             unet_diffusion = UNet_diffusion_normal(
                 backbone=self.model.unet,
                 conv_out=conv_out
+            )
+            self.model.unet = unet_diffusion
+        elif distributional_method == 'iDDPM':
+            conv_out = self._remove_unet_conv_out()
+            unet_diffusion = UNet_diffusion_iDDPM(
+                backbone=self.model.unet,
+                conv_out=conv_out,
+                beta=self.training_noise_scheduler.betas
             )
             self.model.unet = unet_diffusion
         elif distributional_method == 'mvnormal':
@@ -146,17 +163,13 @@ class MarigoldTrainer:
             warmup_steps=self.cfg.lr_scheduler.kwargs.warmup_steps,
         )
         self.lr_scheduler = LambdaLR(optimizer=self.optimizer, lr_lambda=lr_func)
-        
-        self.loss = get_loss(loss_name=self.cfg.loss.name, **self.cfg.loss.kwargs)
 
-        # Training noise scheduler
-        self.training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
-            os.path.join(
-                base_ckpt_dir,
-                cfg.trainer.training_noise_scheduler.pretrained_path,
-                "scheduler",
-            )
+        self.loss = get_loss(
+            loss_name=self.cfg.loss.name,
+            beta=self.training_noise_scheduler.betas,
+            **self.cfg.loss.kwargs,
         )
+
         self.prediction_type = self.training_noise_scheduler.config.prediction_type
         assert (
             self.prediction_type == self.model.scheduler.config.prediction_type
@@ -361,7 +374,29 @@ class MarigoldTrainer:
 
                 # Masked latent loss
                 if self.gt_mask_type is not None:
-                    latent_loss = self.loss(
+                    if self.cfg.loss.name == "iDDPMLoss":
+
+                        masked_model_pred_list = []
+                        target_pred_list = []
+                        for i in range(batch_size):
+                            masked_model_pred_list.append(
+                                model_pred[i][valid_mask_down[i]].unsqueeze(0)
+                            )
+                            target_pred_list.append(
+                                target[i][valid_mask_down[i]].unsqueeze(0)
+                            )
+                        
+                        latent_loss = self.loss(
+                            # torch.cat(target_pred_list, dim=0).float(),
+                            # torch.cat(masked_model_pred_list, dim=0).float(),
+                            # t = timesteps,
+                            target.float(),
+                            model_pred.float(),
+                            t = timesteps,
+                            mask = valid_mask_down,
+                        )
+                    else:
+                        latent_loss = self.loss(
                         target[valid_mask_down].float(),
                         model_pred[valid_mask_down].float(),
                     )

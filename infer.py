@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from marigold import MarigoldPipeline
-from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_mvnormal, UNet_diffusion_normal
+from marigold.diffusionUQ.unet import UNet_diffusion_mean, UNet_diffusion_mixednormal, UNet_diffusion_mvnormal, UNet_diffusion_normal, UNet_diffusion_iDDPM
 from marigold.util.ensemble import ensemble_align
 from src.util.seeding import seed_all
 from src.dataset import (
@@ -335,6 +335,19 @@ if "__main__" == __name__:
             unet_diffusion = UNet_diffusion_normal(
                 backbone=pipe.unet,
                 conv_out=old_conv_out
+            )
+        if distributional_method == 'iDDPM':
+            # training_noise_scheduler: DDPMScheduler = DDPMScheduler.from_pretrained(
+            #     os.path.join(
+            #         base_ckpt_dir,
+            #         cfg.trainer.training_noise_scheduler.pretrained_path,
+            #         "scheduler",
+            #     )
+            # )
+            unet_diffusion = UNet_diffusion_iDDPM(
+                backbone=pipe.unet,
+                conv_out=old_conv_out,
+                beta=pipe.scheduler.betas
             )
         elif distributional_method == 'mvnormal':
             unet_diffusion = UNet_diffusion_mvnormal(
